@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16
+    ports:
+      # 5110: 호스트 로컬 postgres(brew 등)와의 5432 충돌 회피. 인프라는 5110+ 대역 (FE 5100 / 백엔드 5101~5109 / 인프라 5110~)
+      - "5110:5432"
+    environment:
+      POSTGRES_USER: bitshuriken
+      POSTGRES_PASSWORD: bitshuriken
+      POSTGRES_DB: bitshuriken
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 5114
+    ports:
+      - "5114:5114"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "5113:5113"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:5114
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:5113
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:5113
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  # Local SMTP sink for dev (email verification / password reset / 2FA). Point BE at it
+  # with SMTP_HOST=localhost SMTP_PORT=5111. Inbox web UI at http://localhost:5112.
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "5111:1025"   # SMTP
+      - "5112:8025"   # web UI
+
+volumes:
+  pgdata:

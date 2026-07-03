@@ -1,0 +1,16 @@
+# sub-repos — 각자 독립 git 레포
+/bitshuriken-prod-be/
+/bitshuriken-prod-fe/
+/bitshuriken-prod-match/
+/bitshuriken-prod-infra/
+
+# dev 런타임 산출물
+/logs/
+/.run/
+
+# env
+.env
+.env.*
+
+# OS
+.DS_Store
