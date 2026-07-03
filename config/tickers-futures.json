@@ -1,0 +1,333 @@
+{
+  "tickers": [
+    {
+      "market": "futures",
+      "symbol": "BTCUSDT",
+      "partition": 0,
+      "pricePrecision": 1,
+      "qtyPrecision": 3
+    },
+    {
+      "market": "futures",
+      "symbol": "ETHUSDT",
+      "partition": 2,
+      "pricePrecision": 2,
+      "qtyPrecision": 3
+    },
+    {
+      "market": "futures",
+      "symbol": "SOLUSDT",
+      "partition": 1,
+      "pricePrecision": 2,
+      "qtyPrecision": 2
+    },
+    {
+      "market": "futures",
+      "symbol": "XRPUSDT",
+      "partition": 1,
+      "pricePrecision": 4,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "futures",
+      "symbol": "BNBUSDT",
+      "partition": 1,
+      "pricePrecision": 2,
+      "qtyPrecision": 2
+    },
+    {
+      "market": "futures",
+      "symbol": "DOGEUSDT",
+      "partition": 2,
+      "pricePrecision": 5,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "ADAUSDT",
+      "partition": 5,
+      "pricePrecision": 4,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "AVAXUSDT",
+      "partition": 5,
+      "pricePrecision": 3,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "LINKUSDT",
+      "partition": 1,
+      "pricePrecision": 3,
+      "qtyPrecision": 2
+    },
+    {
+      "market": "futures",
+      "symbol": "DOTUSDT",
+      "partition": 2,
+      "pricePrecision": 3,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "futures",
+      "symbol": "LTCUSDT",
+      "partition": 4,
+      "pricePrecision": 2,
+      "qtyPrecision": 3
+    },
+    {
+      "market": "futures",
+      "symbol": "ATOMUSDT",
+      "partition": 4,
+      "pricePrecision": 3,
+      "qtyPrecision": 2
+    },
+    {
+      "market": "futures",
+      "symbol": "TRXUSDT",
+      "partition": 3,
+      "pricePrecision": 5,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "ZECUSDT",
+      "partition": 1,
+      "pricePrecision": 2,
+      "qtyPrecision": 3
+    },
+    {
+      "market": "futures",
+      "symbol": "XLMUSDT",
+      "partition": 0,
+      "pricePrecision": 5,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "BCHUSDT",
+      "partition": 2,
+      "pricePrecision": 2,
+      "qtyPrecision": 3
+    },
+    {
+      "market": "futures",
+      "symbol": "HBARUSDT",
+      "partition": 0,
+      "pricePrecision": 5,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "SUIUSDT",
+      "partition": 4,
+      "pricePrecision": 4,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "futures",
+      "symbol": "NEARUSDT",
+      "partition": 5,
+      "pricePrecision": 3,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "XAUTUSDT",
+      "partition": 1,
+      "pricePrecision": 2,
+      "qtyPrecision": 3
+    },
+    {
+      "market": "futures",
+      "symbol": "TAOUSDT",
+      "partition": 3,
+      "pricePrecision": 2,
+      "qtyPrecision": 3
+    },
+    {
+      "market": "futures",
+      "symbol": "WLDUSDT",
+      "partition": 0,
+      "pricePrecision": 4,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "WLFIUSDT",
+      "partition": 5,
+      "pricePrecision": 5,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "PAXGUSDT",
+      "partition": 5,
+      "pricePrecision": 2,
+      "qtyPrecision": 3
+    },
+    {
+      "market": "futures",
+      "symbol": "UNIUSDT",
+      "partition": 5,
+      "pricePrecision": 3,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "ONDOUSDT",
+      "partition": 3,
+      "pricePrecision": 4,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "futures",
+      "symbol": "ASTERUSDT",
+      "partition": 2,
+      "pricePrecision": 4,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "SKYUSDT",
+      "partition": 2,
+      "pricePrecision": 5,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "MORPHOUSDT",
+      "partition": 0,
+      "pricePrecision": 4,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "futures",
+      "symbol": "ICPUSDT",
+      "partition": 1,
+      "pricePrecision": 3,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "ETCUSDT",
+      "partition": 5,
+      "pricePrecision": 3,
+      "qtyPrecision": 2
+    },
+    {
+      "market": "futures",
+      "symbol": "AAVEUSDT",
+      "partition": 4,
+      "pricePrecision": 2,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "futures",
+      "symbol": "QNTUSDT",
+      "partition": 0,
+      "pricePrecision": 2,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "futures",
+      "symbol": "ALGOUSDT",
+      "partition": 4,
+      "pricePrecision": 4,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "futures",
+      "symbol": "ENAUSDT",
+      "partition": 5,
+      "pricePrecision": 5,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "RENDERUSDT",
+      "partition": 3,
+      "pricePrecision": 3,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "futures",
+      "symbol": "POLUSDT",
+      "partition": 2,
+      "pricePrecision": 5,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "JSTUSDT",
+      "partition": 2,
+      "pricePrecision": 5,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "DEXEUSDT",
+      "partition": 5,
+      "pricePrecision": 2,
+      "qtyPrecision": 2
+    },
+    {
+      "market": "futures",
+      "symbol": "FILUSDT",
+      "partition": 4,
+      "pricePrecision": 3,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "futures",
+      "symbol": "JUPUSDT",
+      "partition": 2,
+      "pricePrecision": 4,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "ARBUSDT",
+      "partition": 4,
+      "pricePrecision": 5,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "futures",
+      "symbol": "APTUSDT",
+      "partition": 4,
+      "pricePrecision": 4,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "futures",
+      "symbol": "INJUSDT",
+      "partition": 0,
+      "pricePrecision": 3,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "futures",
+      "symbol": "PUMPUSDT",
+      "partition": 5,
+      "pricePrecision": 6,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "NIGHTUSDT",
+      "partition": 3,
+      "pricePrecision": 5,
+      "qtyPrecision": 0
+    },
+    {
+      "market": "futures",
+      "symbol": "DASHUSDT",
+      "partition": 5,
+      "pricePrecision": 2,
+      "qtyPrecision": 3
+    }
+  ]
+}
