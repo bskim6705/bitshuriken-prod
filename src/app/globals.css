@@ -1,0 +1,106 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0b0e11;
+  --color-surface: #181a20;
+  --color-raised: #1e2329;
+  --color-hover: #2b3139;
+  --color-line: #2b3139;
+  --color-line-strong: #474d57;
+  --color-text: #eaecef;
+  --color-text-dim: #848e9c;
+  --color-text-muted: #5e6673;
+  --color-accent: #fcd535;
+  --color-accent-hover: #f0b90b;
+  --color-up: #0ecb81;
+  --color-up-soft: #103b2b;
+  --color-down: #f6465d;
+  --color-down-soft: #3b1721;
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html, body {
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--color-accent);
+  color: #0b0e11;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-line); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-line-strong); }
+
+/* keyboard focus — visible ring on every interactive element. :focus-visible only,
+   so mouse/touch clicks stay clean. :where() = 0 specificity, composes with the
+   component-level focus:border-accent styles instead of fighting them. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* respect reduced-motion preference globally (canvas charts are unaffected) */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@utility tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+@utility label-xs {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--color-text-dim);
+  font-weight: 400;
+}
+
+/* ---- Scalar API reference: embed in a bounded, self-scrolling region ----
+   Scalar's modern layout assumes it owns the viewport: min-height:100dvh and a
+   sticky sidebar sized to --full-height (a value its resize observer writes
+   inline). Mounted in a section of a normal page, that sidebar un-sticks and
+   disappears once scrolled past. We instead make .scalar-host the scroll
+   container and pin --full-height to the region height (100dvh minus the 48px
+   top bar). These rules are intentionally unlayered + !important so they beat
+   Scalar's @layer scalar-config defaults and its inline observer value. */
+.scalar-host {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.scalar-host,
+.scalar-host .scalar-api-reference,
+.scalar-host .references-layout {
+  --full-height: calc(100dvh - 48px) !important;
+  --scalar-custom-header-height: 0px !important;
+}
+.scalar-host .references-layout {
+  min-height: 100% !important;
+}
