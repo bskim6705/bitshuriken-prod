@@ -1,0 +1,451 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MarketType {
+  SPOT
+  FUTURES
+}
+
+enum AssetType {
+  CRYPTO
+  STABLECOIN
+}
+
+model Asset {
+  symbol    String    @id // e.g. "BTC", "USDT"
+  name      String // e.g. "Bitcoin"
+  precision Int // 자산의 본질적 소수점 자릿수
+  type      AssetType
+
+  baseTickers  Ticker[] @relation("BaseAsset")
+  quoteTickers Ticker[] @relation("QuoteAsset")
+  wallets      Wallet[]
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+model User {
+  id             String   @id @default(uuid())
+  email          String   @unique
+  hashedPassword String
+  displayName    String? // 리더보드 공개 이름. 미설정 시 마스킹 이메일로 대체
+  emailVerified    Boolean @default(false)
+  twoFactorEnabled Boolean @default(false)
+  twoFactorSecret  String? // AES-256-GCM 암호문. setup 시 저장, enable 전까지 보류분
+  // 거래 수수료 (basis points, 10 = 0.1%). 유효범위 [0, 10000) — 조회 시 검증.
+  feeMakerBps    Int      @default(10)
+  feeTakerBps    Int      @default(10)
+  role           UserRole @default(USER)
+  // 계정 제한 — admin이 개별 토글(false = 해당 행위 차단). 기본 전부 허용.
+  loginEnabled      Boolean @default(true)
+  tradingEnabled    Boolean @default(true)
+  withdrawalEnabled Boolean @default(true)
+  // null = 마스터/일반 계정. 설정 시 서브계정 — parentUserId가 소유 마스터.
+  // 서브계정은 로그인 자격 없음(합성 email + 사용 불가 password), API 키로만 접근.
+  parentUserId   String?
+  createdAt      DateTime @default(now())
+
+  parent      User?       @relation("Subaccounts", fields: [parentUserId], references: [id])
+  subaccounts User[]      @relation("Subaccounts")
+  wallets     Wallet[]
+  orders      Order[]
+  makerTrades Trade[]     @relation("MakerTrades")
+  takerTrades Trade[]     @relation("TakerTrades")
+  apiKeys     ApiKey[]
+  orderLists  OrderList[]
+  positions   Position[]
+  fundingTxs  FundingTx[]
+  authTokens  AuthToken[]
+  balanceSnapshots BalanceSnapshot[]
+
+  @@index([parentUserId])
+}
+
+enum AuthTokenType {
+  EMAIL_VERIFY
+  PASSWORD_RESET
+}
+
+// 이메일 인증 / 비밀번호 재설정 토큰. raw 토큰은 메일로만 전달, DB엔 sha256 해시만.
+model AuthToken {
+  id        String        @id @default(uuid())
+  userId    String
+  type      AuthTokenType
+  tokenHash String        @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime      @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, type])
+}
+
+// 일별 순자산 스냅샷 (Binance Estimated Balance 대응). futures 앱 cron이 하루 1회 기록.
+// 평가 = spot 보유(last price) + futures 지갑 + 오픈 포지션 미실현손익(mark price). totalUsdt는 기록 시점 확정값.
+model BalanceSnapshot {
+  userId      String
+  day         DateTime // UTC 00:00
+  totalUsdt   Decimal  @db.Decimal(32, 8)
+  spotUsdt    Decimal  @db.Decimal(32, 8)
+  futuresUsdt Decimal  @db.Decimal(32, 8) // 선물 지갑 + 미실현손익
+  breakdown   Json // [{ market, asset, qty, valueUsdt }]
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@id([userId, day])
+}
+
+// ADR-019: API key + HMAC signature 인증. secret은 AES-256-GCM 봉투 암호화 저장 (ADR-044).
+model ApiKey {
+  id          String    @id @default(uuid())
+  userId      String
+  apiKey          String @unique // public part. X-API-KEY 헤더
+  secretEncrypted String // AES-256-GCM 암호문 (iv:tag:ciphertext). HMAC 검증 시 복호화
+  label           String? // 사용자 별칭
+  canTrade    Boolean   @default(false)
+  canRead     Boolean   @default(true)
+  ipWhitelist String[]  @default([]) // schema만, enforcement는 후속
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime?
+  revokedAt   DateTime? // soft delete
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+enum FundingTxType {
+  DEPOSIT
+  WITHDRAWAL
+  TRANSFER
+  ADJUSTMENT // admin 수동 잔고 가감
+  SUBACCOUNT_TRANSFER // 마스터↔서브 / 서브↔서브 계정 간 이체 (양측에 1행씩, counterpartyUserId로 상대 식별)
+}
+
+// 지갑 잔고 이동 원장 (오더북 외) — 입금/출금/내부이체 감사 기록.
+model FundingTx {
+  id          String        @id @default(uuid())
+  userId      String
+  type        FundingTxType
+  assetSymbol String
+  qty         Decimal       @db.Decimal(32, 8)
+  // TRANSFER: 출발/도착 마켓. SUBACCOUNT_TRANSFER: 보낸 쪽은 fromMarket만, 받은 쪽은 toMarket만(방향 표시). 입출금은 한쪽만.
+  fromMarket  MarketType?
+  toMarket    MarketType?
+  counterpartyUserId String? // SUBACCOUNT_TRANSFER 상대 계정 (마스터/서브)
+  status      String        @default("COMPLETED")
+  adminId     String? // 수동 조정 수행 admin (ADJUSTMENT 전용)
+  reason      String? // 조정 사유 (ADJUSTMENT 전용)
+  createdAt   DateTime      @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+}
+
+// 상장 라이프사이클. 신규 주문 게이트(PENDING/HALTED/DELISTED = 주문 거부). 매칭엔진은 인지하지 않음 — BE 검증.
+enum TickerStatus {
+  PENDING // 준비중 — 노출되나 거래 불가
+  TRADING // 정상 거래
+  HALTED // 거래중단 — 신규 주문 차단, 기존 주문/취소 유지
+  DELISTED // 상장폐지 — 신규 주문 차단, 목록 숨김
+}
+
+model Ticker {
+  symbol           String // e.g. "BTCUSDT"
+  marketType       MarketType
+  baseAssetSymbol  String
+  quoteAssetSymbol String
+  pricePrecision   Int // 거래소 호가 소수점 (Binance tickSize 기반)
+  qtyPrecision     Int // 거래소 수량 소수점 (Binance stepSize 기반)
+  // 주문 최소 명목가 (quote 기준). 0 = 제한 없음.
+  // 주의: pricePrecision + qtyPrecision <= 8 이어야 엔진 floor와 정산 잠금 회계가 일치한다.
+  minNotional      Decimal    @default(0) @db.Decimal(32, 8)
+  partition        Int // Kafka 파티션 번호 (1 ticker = 1 partition, ADR-011)
+  status           TickerStatus @default(TRADING) // 상장 라이프사이클 — 신규 주문 게이트
+
+  baseAsset  Asset      @relation("BaseAsset", fields: [baseAssetSymbol], references: [symbol])
+  quoteAsset Asset      @relation("QuoteAsset", fields: [quoteAssetSymbol], references: [symbol])
+  orders     Order[]
+  trades     Trade[]
+  positions  Position[]
+
+  @@id([symbol, marketType])
+}
+
+model Wallet {
+  userId      String
+  assetSymbol String
+  marketType  MarketType
+  balance     Decimal    @db.Decimal(32, 8)
+  locked      Decimal    @default(0) @db.Decimal(32, 8)
+  // user stream의 잔고 이벤트 순서 역전 방지용 (FE가 자산별 max(updatedAt) 유지)
+  updatedAt   DateTime   @updatedAt
+
+  user  User  @relation(fields: [userId], references: [id])
+  asset Asset @relation(fields: [assetSymbol], references: [symbol])
+
+  @@id([userId, assetSymbol, marketType])
+}
+
+model Order {
+  id                 String      @id @default(uuid())
+  // 클라이언트 지정 주문 id (없으면 BE 자동생성). cancel/query 주소 지정 + 멱등 배치용.
+  // 유니크 범위는 (userId, tickerMarket) — 같은 상품 내 재사용 금지(종결 후 포함), 상품 간은 독립.
+  clientOrderId      String?
+  userId             String
+  tickerSymbol       String
+  tickerMarket       MarketType
+  type               OrderType
+  side               OrderSide
+  timeInForce        TimeInForce
+  price              Decimal?    @db.Decimal(32, 8) // null for MARKET
+  stopPrice          Decimal?    @db.Decimal(32, 8) // stop류 전용 트리거 가격
+  origQty            Decimal?    @db.Decimal(32, 8) // base qty 요청 (LIMIT, MARKET SELL, MARKET BUY by base)
+  origQuoteQty       Decimal?    @db.Decimal(32, 8) // quote qty 요청 (MARKET BUY by quote)
+  executedQty        Decimal     @default(0) @db.Decimal(32, 8) // base 누적 체결량
+  cumulativeQuoteQty Decimal     @default(0) @db.Decimal(32, 8) // quote 누적 체결액
+  status             OrderStatus @default(NEW)
+  // stop류: null이면 미트리거(BE 보관 중, 엔진 미전송)
+  triggeredAt        DateTime?
+  // futures 전용 — spot 주문은 항상 기본값
+  reduceOnly         Boolean     @default(false)
+  liquidation        Boolean     @default(false) // 청산 모니터가 발행한 주문 표식
+  lockedCost         Decimal?    @db.Decimal(32, 8) // 접수 시 잠근 비용 (IM + openLoss + 수수료 예약)
+  orderListId        String?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  user        User       @relation(fields: [userId], references: [id])
+  ticker      Ticker     @relation(fields: [tickerSymbol, tickerMarket], references: [symbol, marketType])
+  orderList   OrderList? @relation(fields: [orderListId], references: [id])
+  makerTrades Trade[]    @relation("MakerTrades")
+  takerTrades Trade[]    @relation("TakerTrades")
+
+  @@unique([userId, tickerMarket, clientOrderId])
+  @@index([userId, status])
+  @@index([userId, tickerSymbol, tickerMarket, createdAt])
+}
+
+// OCO 주문 리스트. 잠금은 리스트 단위 1회(lockAssetSymbol/lockAmount) —
+// 레그별 개별 잠금/환불 없음, 환불은 리스트 종결 시 listref:{id} 이벤트 1건.
+model OrderList {
+  id              String          @id @default(uuid())
+  userId          String
+  tickerSymbol    String
+  tickerMarket    MarketType
+  side            OrderSide
+  contingencyType ContingencyType
+  status          OrderListStatus @default(EXECUTING)
+  // 유저 취소 요청 표식 — stop 레그 arming 차단
+  cancelRequested Boolean         @default(false)
+  // stop 트리거됨 + limit 레그 취소 대기 중 표식 (크래시 복구용)
+  stopPendingAt   DateTime?
+  lockAssetSymbol String
+  lockAmount      Decimal         @db.Decimal(32, 8)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id])
+  orders Order[]
+
+  @@index([userId, createdAt])
+}
+
+model Trade {
+  id                   String     @id @default(uuid())
+  // 삽입 순서 = 파티션 내 엔진 발행 순서. kline OHLC tie-break용. API 응답에 노출 금지.
+  seq                  Int        @unique @default(autoincrement())
+  tickerSymbol         String
+  tickerMarket         MarketType
+  makerOrderId         String
+  takerOrderId         String
+  makerUserId          String
+  takerUserId          String
+  takerSide            OrderSide
+  price                Decimal    @db.Decimal(32, 8)
+  qty                  Decimal    @db.Decimal(32, 8)
+  // 수수료 — 각 당사자가 수령하는 자산에서 차감 (BUY측 base, SELL측 quote)
+  makerCommission      Decimal    @default(0) @db.Decimal(32, 8)
+  takerCommission      Decimal    @default(0) @db.Decimal(32, 8)
+  makerCommissionAsset String?
+  takerCommissionAsset String?
+  // 엔진 체결 시각 (TR 메시지 ts). kline 버킷 기준.
+  executedAt           DateTime   @default(now())
+  createdAt            DateTime   @default(now())
+
+  makerOrder Order  @relation("MakerTrades", fields: [makerOrderId], references: [id])
+  takerOrder Order  @relation("TakerTrades", fields: [takerOrderId], references: [id])
+  makerUser  User   @relation("MakerTrades", fields: [makerUserId], references: [id])
+  takerUser  User   @relation("TakerTrades", fields: [takerUserId], references: [id])
+  ticker     Ticker @relation(fields: [tickerSymbol, tickerMarket], references: [symbol, marketType])
+
+  @@index([tickerSymbol, tickerMarket, executedAt])
+  @@index([makerUserId, createdAt])
+  @@index([takerUserId, createdAt])
+}
+
+enum OrderSide {
+  BUY
+  SELL
+}
+
+enum OrderType {
+  MARKET
+  LIMIT
+  POST_ONLY
+  STOP_LOSS // 트리거 시 'M'으로 엔진 전송
+  STOP_LOSS_LIMIT // 트리거 시 'L'로 엔진 전송
+  TAKE_PROFIT // 'M'
+  TAKE_PROFIT_LIMIT // 'L'
+  // TBD: TRAILING_STOP, TWAP, ICEBERG(엔진 지원 필요)
+}
+
+enum ContingencyType {
+  OCO
+}
+
+enum OrderListStatus {
+  EXECUTING
+  ALL_DONE
+  REJECTED
+}
+
+enum TimeInForce {
+  GTC
+  IOC
+  FOK
+}
+
+enum OrderStatus {
+  NEW
+  OPEN
+  PARTIAL
+  FILLED
+  CANCELED
+  REJECTED
+  EXPIRED
+}
+
+// ADR-014: Async settlement via append-only event log.
+// match-result handler가 wallet row를 직접 update하지 않고 event를 append.
+// settlement worker가 100ms마다 PENDING event를 batch로 wallet에 반영.
+model SettlementEvent {
+  id        String           @id @default(uuid())
+  // 삽입 순서 = consume 직렬 insert 순. futures worker 적용 순서 키 (createdAt ms 동률 tie-break).
+  seq       Int              @unique @default(autoincrement())
+  // 멱등 키. TR이면 tradeId, dust 환불이면 "dust:{orderId}".
+  sourceKey String           @unique
+  kind      SettlementKind
+  // [{ userId, assetSymbol, marketType, lockedDelta, balanceDelta }, ...]
+  legs      Json
+  // [{ orderId, executedQtyDelta, cumulativeQuoteQtyDelta }, ...]
+  orderLegs Json
+  status    SettlementStatus @default(PENDING)
+  createdAt DateTime         @default(now())
+  appliedAt DateTime?
+
+  @@index([status, createdAt])
+}
+
+enum SettlementKind {
+  TRADE
+  DUST_REFUND
+  FUTURES_TRADE
+  FUTURES_REFUND
+  FUNDING
+  LIQUIDATION_TAKEOVER
+}
+
+enum SettlementStatus {
+  PENDING
+  APPLIED
+}
+
+enum PositionStatus {
+  NORMAL
+  LIQUIDATING
+}
+
+// 마진 모드 — 심볼별 토글. CROSS는 free 지갑 잔고를 공용 담보로, 청산은 계정 단위.
+enum MarginMode {
+  ISOLATED
+  CROSS
+}
+
+// One-way 포지션. qty는 signed: +롱 −숏. isolatedMargin은 두 모드 공통 "포지션 예약 마진".
+model Position {
+  userId         String
+  tickerSymbol   String
+  tickerMarket   MarketType // 항상 FUTURES (Ticker FK 구성용)
+  qty            Decimal        @default(0) @db.Decimal(32, 8)
+  entryPrice     Decimal        @default(0) @db.Decimal(32, 8)
+  isolatedMargin Decimal        @default(0) @db.Decimal(32, 8)
+  leverage       Int            @default(10)
+  marginMode     MarginMode     @default(ISOLATED)
+  status         PositionStatus @default(NORMAL)
+  updatedAt      DateTime       @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id])
+  ticker Ticker @relation(fields: [tickerSymbol, tickerMarket], references: [symbol, marketType])
+
+  @@id([userId, tickerSymbol])
+}
+
+// Ticker(FUTURES) 1:1 정책 파라미터. 펀딩 주기/이자율은 코드 상수 — DB 필드 아님.
+// 로드 시 invariant 검증(위반 시 throw): 1/maxLeverage > mmr + liquidationFeeRate
+model FuturesConfig {
+  tickerSymbol        String  @id
+  maxLeverage         Int
+  mmr                 Decimal @db.Decimal(10, 8) // maintenance margin rate
+  liquidationFeeRate  Decimal @db.Decimal(10, 8)
+  maxNotional         Decimal @db.Decimal(32, 8) // 포지션+미체결 합산 상한 (quote 기준)
+  fundingCap          Decimal @db.Decimal(10, 8) // 펀딩 rate 절대값 상한
+  priceBandPct        Decimal @db.Decimal(10, 8) // LIMIT 주문가 허용폭 (mark 기준)
+  marketCostBufferPct Decimal @db.Decimal(10, 8) // MARKET 가정가 버퍼
+  markClampPct        Decimal @db.Decimal(10, 8) // mark = index ± clamp
+}
+
+// 펀딩 정산 이력 (UTC 00/08/16)
+model FundingRate {
+  id           String   @id @default(uuid())
+  tickerSymbol String
+  fundingTime  DateTime
+  rate         Decimal  @db.Decimal(10, 8)
+  markPrice    Decimal  @db.Decimal(32, 8)
+
+  @@unique([tickerSymbol, fundingTime])
+}
+
+enum FuturesIncomeType {
+  REALIZED_PNL
+  COMMISSION
+  FUNDING_FEE
+  LIQUIDATION_FEE
+  TRANSFER
+  INSURANCE_CLEAR
+}
+
+// 조회용 수익 원장. 정산 worker apply 트랜잭션에서 insert.
+model FuturesIncome {
+  id           String            @id @default(uuid())
+  userId       String
+  tickerSymbol String? // TRANSFER 등 심볼 무관 항목은 null
+  incomeType   FuturesIncomeType
+  income       Decimal           @db.Decimal(32, 8) // signed
+  sourceKey    String            @unique // 멱등 키
+  createdAt    DateTime          @default(now())
+
+  @@index([userId, createdAt])
+}

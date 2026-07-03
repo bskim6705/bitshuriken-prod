@@ -1,0 +1,611 @@
+import { Injectable, Logger, HttpStatus } from '@nestjs/common';
+import { MarketType, Order, OrderList, OrderStatus } from '@prisma/client';
+import { Decimal } from '@prisma/client/runtime/library';
+import { PrismaService } from '@app/infra/prisma/prisma.service';
+import { TickerStatsService } from '@app/core-domain/ticker/ticker-stats.service';
+import { UserService } from '@app/core-domain/user/user.service';
+import { UserStreamService } from '../user-stream/user-stream.service';
+import { SettlementService } from '../settlement/settlement.service';
+import { TriggerRegistryService } from '../trigger/trigger-registry.service';
+import { OrderDispatchService } from '../order/order-dispatch.service';
+import { buildExecutionReport } from '../order/execution-report';
+import { validateAgainstMeta } from '../order/order-validation';
+import { CreateOrderListDto } from './dto/create-order-list.dto';
+import { OcoStateMachine, TERMINAL_STATUSES, decideLegTerminal } from './oco-state-machine';
+import { LegFinalValues, resolveFinalization } from './oco-refund';
+import { DomainException } from '@app/shared/exceptions/domain.exception';
+import { ErrorCode } from '@app/shared/constants/error-codes';
+
+const ZERO = new Decimal(0);
+const MAX_LIST_QUERY_LIMIT = 500;
+
+type ListWithOrders = OrderList & { orders: Order[] };
+
+/**
+ * OCO 주문 리스트 orchestration. 전이 판정/실행은 oco-state-machine, 환불 산정은 oco-refund.
+ * 불변식: orderListId가 있는 주문에 per-order 환불 금지, 환불은 listref:{listId} 단 1회.
+ */
+@Injectable()
+export class OrderListService {
+  private readonly logger = new Logger(OrderListService.name);
+  // 레그별 최종 eq/cqq (OU 메시지 값) — finalize 환불 산정용. 재시작 시엔 drain 후 DB 값 사용.
+  private readonly finalLegValues = new Map<string, LegFinalValues>();
+  // 부트 복구(drain 후) 완료 전엔 DB eq/cqq가 stale일 수 있음 — hint 없는 결정 차단용
+  private recovered = false;
+
+  constructor(
+    private prisma: PrismaService,
+    private tickerStats: TickerStatsService,
+    private userStream: UserStreamService,
+    private settlement: SettlementService,
+    private registry: TriggerRegistryService,
+    private dispatch: OrderDispatchService,
+    private machine: OcoStateMachine,
+    private users: UserService,
+  ) {}
+
+  // ---------- placement ----------
+
+  async createOcoList(userId: string, dto: CreateOrderListDto) {
+    const meta = this.tickerStats.metaOf(dto.tickerMarket, dto.tickerSymbol);
+    if (!meta)
+      throw new DomainException(
+        ErrorCode.TICKER_NOT_FOUND,
+        'Ticker not found',
+        HttpStatus.NOT_FOUND,
+      );
+
+    // 상장 상태 게이트 — 비-TRADING ticker는 신규 OCO 거부
+    await this.tickerStats.assertTradable(dto.tickerMarket, dto.tickerSymbol);
+    // 계정 거래 정지 게이트
+    await this.users.assertCanTrade(userId);
+
+    const qty = new Decimal(dto.qty);
+    const price = new Decimal(dto.price);
+    const stopPrice = new Decimal(dto.stopPrice);
+    const stopLimitPrice = new Decimal(dto.stopLimitPrice);
+
+    const last = await this.lastPriceOf(dto.tickerMarket, dto.tickerSymbol);
+    if (last === null) {
+      throw new DomainException(
+        ErrorCode.OCO_PRICE_INVALID,
+        'No last price available — OCO price relations cannot be validated',
+      );
+    }
+    if (dto.side === 'SELL') {
+      if (!(price.gt(last) && last.gt(stopPrice))) {
+        throw new DomainException(
+          ErrorCode.OCO_PRICE_INVALID,
+          'OCO SELL requires price > last price > stopPrice',
+        );
+      }
+    } else {
+      if (!(price.lt(last) && last.lt(stopPrice))) {
+        throw new DomainException(
+          ErrorCode.OCO_PRICE_INVALID,
+          'OCO BUY requires price < last price < stopPrice',
+        );
+      }
+    }
+
+    // 양 레그 모두 tick/step/minNotional 검증
+    validateAgainstMeta({
+      type: 'LIMIT',
+      side: dto.side,
+      price,
+      stopPrice: null,
+      origQty: qty,
+      origQuoteQty: null,
+      meta,
+      lastPrice: last,
+    });
+    validateAgainstMeta({
+      type: 'STOP_LOSS_LIMIT',
+      side: dto.side,
+      price: stopLimitPrice,
+      stopPrice,
+      origQty: qty,
+      origQuoteQty: null,
+      meta,
+      lastPrice: last,
+    });
+
+    // 리스트 단위 잠금 1회: SELL은 base qty, BUY는 quote max(price, stopLimitPrice)*qty
+    const lockAssetSymbol = dto.side === 'SELL' ? meta.baseAsset : meta.quoteAsset;
+    const lockAmount = dto.side === 'SELL' ? qty : Decimal.max(price, stopLimitPrice).mul(qty);
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      const wallet = await tx.wallet.findUnique({
+        where: {
+          userId_assetSymbol_marketType: {
+            userId,
+            assetSymbol: lockAssetSymbol,
+            marketType: dto.tickerMarket,
+          },
+        },
+      });
+      if (!wallet)
+        throw new DomainException(
+          ErrorCode.WALLET_NOT_FOUND,
+          `Wallet not found for ${lockAssetSymbol}`,
+        );
+
+      // 원자적 조건부 차감 — check-then-update는 동시 주문에서 초과 인출 가능
+      const debit = await tx.wallet.updateMany({
+        where: {
+          userId,
+          assetSymbol: lockAssetSymbol,
+          marketType: dto.tickerMarket,
+          balance: { gte: lockAmount },
+        },
+        data: {
+          balance: { decrement: lockAmount },
+          locked: { increment: lockAmount },
+        },
+      });
+      if (debit.count === 0)
+        throw new DomainException(ErrorCode.INSUFFICIENT_BALANCE, 'Insufficient balance');
+
+      const updatedWallet = await tx.wallet.findUnique({
+        where: {
+          userId_assetSymbol_marketType: {
+            userId,
+            assetSymbol: lockAssetSymbol,
+            marketType: dto.tickerMarket,
+          },
+        },
+      });
+      if (!updatedWallet) {
+        throw new Error(`wallet row vanished after debit (${userId}/${lockAssetSymbol})`);
+      }
+
+      const list = await tx.orderList.create({
+        data: {
+          userId,
+          tickerSymbol: dto.tickerSymbol,
+          tickerMarket: dto.tickerMarket,
+          side: dto.side,
+          contingencyType: 'OCO',
+          lockAssetSymbol,
+          lockAmount,
+        },
+      });
+
+      const limitLeg = await tx.order.create({
+        data: {
+          userId,
+          tickerSymbol: dto.tickerSymbol,
+          tickerMarket: dto.tickerMarket,
+          type: 'LIMIT',
+          side: dto.side,
+          timeInForce: 'GTC',
+          price,
+          origQty: qty,
+          orderListId: list.id,
+          status: 'NEW',
+        },
+      });
+
+      const stopLeg = await tx.order.create({
+        data: {
+          userId,
+          tickerSymbol: dto.tickerSymbol,
+          tickerMarket: dto.tickerMarket,
+          type: 'STOP_LOSS_LIMIT',
+          side: dto.side,
+          timeInForce: dto.stopLimitTimeInForce,
+          price: stopLimitPrice,
+          stopPrice,
+          origQty: qty,
+          orderListId: list.id,
+          status: 'NEW',
+        },
+      });
+
+      return { list, limitLeg, stopLeg, wallet: updatedWallet };
+    });
+
+    this.userStream.emitAccountPosition(userId, [
+      {
+        asset: created.wallet.assetSymbol,
+        free: created.wallet.balance.toFixed(8),
+        locked: created.wallet.locked.toFixed(8),
+        ts: created.wallet.updatedAt.getTime(),
+      },
+    ]);
+    this.reportLocal(created.limitLeg, 'NEW');
+    this.reportLocal(created.stopLeg, 'NEW');
+    this.userStream.emitListStatus(userId, {
+      orderListId: created.list.id,
+      symbol: created.list.tickerSymbol,
+      status: 'EXECUTING',
+      orders: [
+        { orderId: created.limitLeg.id, status: created.limitLeg.status },
+        { orderId: created.stopLeg.id, status: created.stopLeg.status },
+      ],
+      ts: Date.now(),
+    });
+
+    await this.dispatch.dispatchNewOrder(created.limitLeg);
+
+    // stop 레그 트리거 활성화는 limit NO 전송 후 — 그 전에 트리거되면 엔진이 모르는 주문에 CO가 나간다
+    this.registry.add(created.stopLeg);
+
+    return { orderList: created.list, orders: [created.limitLeg, created.stopLeg] };
+  }
+
+  // ---------- state machine ----------
+
+  /** 레그 체결 감지 (handleTrade에서 await): stop 레그가 아직 NEW+미트리거면 로컬 취소. 멱등. */
+  async onLegExecuted(orderId: string): Promise<void> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { id: true, orderListId: true },
+    });
+    if (!order?.orderListId) return;
+
+    const list = await this.loadList(order.orderListId);
+    if (!list) return;
+    const { stopLeg } = this.splitLegs(list);
+    if (!stopLeg) return;
+
+    if (stopLeg.status === 'NEW' && stopLeg.triggeredAt === null) {
+      // limit이 이미 terminal일 수 있는 재처리 경로 대비 — 멱등 finalize 시도 포함
+      await this.cancelStopThenResolve(list, stopLeg);
+    }
+  }
+
+  /** Flow B step 1: stop 트리거됨 → limit 레그 취소 요청. (registry에서 stop은 이미 동기 제거됨) */
+  async onStopTriggered(stopLeg: Order): Promise<void> {
+    if (!stopLeg.orderListId) {
+      throw new Error(`onStopTriggered called for non-OCO order ${stopLeg.id}`);
+    }
+    const list = await this.loadList(stopLeg.orderListId);
+    if (!list) return;
+    const { limitLeg } = this.splitLegs(list);
+    if (!limitLeg) return;
+
+    // limit이 이미 terminal이면 즉시 step 2 — 엔진은 unknown CO에 무응답이므로 OU를 기다리지 않는다.
+    if (TERMINAL_STATUSES.has(limitLeg.status)) {
+      await this.onLegTerminal(list.id);
+      return;
+    }
+
+    const claimed = await this.machine.claimStopPending(list.id);
+    if (!claimed) return; // 이미 진행 중이거나 취소 요청됨
+
+    await this.dispatch.dispatchCancelOrder(limitLeg);
+  }
+
+  /**
+   * OCO 레그의 terminal 전이(OU/로컬) 후 호출. hint = OU 메시지의 eq/cqq.
+   * trigger-pending 메모리 상태와 무관하게 항상 동작 — DB 주도.
+   */
+  async onLegTerminal(
+    listId: string,
+    hint?: { orderId: string; eq: Decimal; cqq: Decimal },
+  ): Promise<void> {
+    if (hint) this.finalLegValues.set(hint.orderId, { eq: hint.eq, cqq: hint.cqq });
+
+    const list = await this.loadList(listId);
+    if (!list) return;
+    const { limitLeg, stopLeg } = this.splitLegs(list);
+    if (!limitLeg || !stopLeg) return;
+
+    // 복구 전 + hint 없는 terminal 레그 = DB eq/cqq가 stale일 수 있음(worker 비동기 적용).
+    // 잘못된 arming/환불 산정을 막기 위해 미루고 부트 복구 재실행에 맡긴다.
+    if (!this.recovered) {
+      const missingHint = [limitLeg, stopLeg].some(
+        (leg) => TERMINAL_STATUSES.has(leg.status) && !this.finalLegValues.has(leg.id),
+      );
+      if (missingHint) {
+        this.logger.warn(`deferring OCO resolution for list ${listId} until boot recovery`);
+        return;
+      }
+    }
+
+    const action = decideLegTerminal({
+      cancelRequested: list.cancelRequested,
+      limitStatus: limitLeg.status,
+      stopStatus: stopLeg.status,
+      stopArmed: stopLeg.triggeredAt !== null,
+      limitExecutedZero: this.finalValuesOf(limitLeg).eq.isZero(),
+    });
+
+    switch (action) {
+      case 'ARM_STOP': {
+        // Flow B step 2 arming: stop 레그를 엔진으로
+        if (await this.machine.claimArmStop(stopLeg.id)) {
+          this.registry.remove(stopLeg.id);
+          await this.machine.clearStopPending(list.id);
+          await this.dispatch.dispatchNewOrder(stopLeg);
+          this.reportLocal(stopLeg, 'NEW'); // arming 후 executionReport
+          return;
+        }
+        // claim 0: 취소와의 레이스 패배 → 로컬 취소 경로로
+        await this.cancelStopThenResolve(list, stopLeg);
+        return;
+      }
+      case 'CANCEL_STOP_LOCALLY':
+        await this.cancelStopThenResolve(list, stopLeg);
+        return;
+      case 'FINALIZE':
+        await this.finalize(list, limitLeg, stopLeg);
+        return;
+      case 'NONE':
+        return;
+    }
+  }
+
+  /** 유저 리스트 취소. guarded cancelRequested claim → 레그별 취소 라우팅. */
+  async cancelList(
+    userId: string,
+    listId: string,
+    opts?: { idempotent?: boolean },
+  ): Promise<{ orderList: OrderList; orders: Order[] }> {
+    const list = await this.loadList(listId);
+    if (!list)
+      throw new DomainException(
+        ErrorCode.ORDER_LIST_NOT_FOUND,
+        'Order list not found',
+        HttpStatus.NOT_FOUND,
+      );
+    if (list.userId !== userId)
+      throw new DomainException(ErrorCode.FORBIDDEN, 'Not your order list', HttpStatus.FORBIDDEN);
+
+    const claimed = await this.machine.claimCancelRequested(listId);
+    if (!claimed && !opts?.idempotent) {
+      throw new DomainException(
+        ErrorCode.ORDER_LIST_NOT_CANCELABLE,
+        'Order list is not cancelable',
+      );
+    }
+
+    if (claimed) {
+      const { limitLeg, stopLeg } = this.splitLegs(list);
+      if (stopLeg && !TERMINAL_STATUSES.has(stopLeg.status)) {
+        if (stopLeg.status === 'NEW' && stopLeg.triggeredAt === null) {
+          const canceled = await this.cancelStopLegLocally(list, stopLeg);
+          // 레이스 패배(armed 직전/직후) — 엔진 거주 가능성에 대비해 CO
+          if (!canceled) await this.dispatch.dispatchCancelOrder(stopLeg);
+        } else {
+          await this.dispatch.dispatchCancelOrder(stopLeg);
+        }
+      }
+      if (limitLeg && !TERMINAL_STATUSES.has(limitLeg.status)) {
+        await this.dispatch.dispatchCancelOrder(limitLeg);
+      }
+      // 양 레그가 이미 terminal이면 즉시 finalize (그 외엔 OU 흐름이 자연 finalize)
+      await this.onLegTerminal(listId);
+    }
+
+    const refreshed = await this.loadList(listId);
+    if (!refreshed)
+      throw new DomainException(
+        ErrorCode.ORDER_LIST_NOT_FOUND,
+        'Order list not found',
+        HttpStatus.NOT_FOUND,
+      );
+    return { orderList: refreshed, orders: refreshed.orders };
+  }
+
+  // ---------- boot recovery ----------
+
+  /** 부트 복구 — settlement drain 완료 후 호출 (DB 값이 authoritative). */
+  async runBootRecovery(): Promise<void> {
+    // drain 완료 후 시작 — 이후 DB eq/cqq fallback 허용 (미뤄둔 케이스도 여기서 재실행)
+    this.recovered = true;
+    const lists = await this.prisma.orderList.findMany({
+      where: { status: 'EXECUTING' },
+      include: { orders: true },
+    });
+    for (const list of lists) {
+      try {
+        await this.recoverList(list);
+      } catch (e) {
+        this.logger.error(`OCO boot recovery failed for list ${list.id}`, e as Error);
+      }
+    }
+    if (lists.length > 0) {
+      this.logger.log(`OCO boot recovery scanned ${lists.length} EXECUTING lists`);
+    }
+  }
+
+  private async recoverList(list: ListWithOrders): Promise<void> {
+    const { limitLeg, stopLeg } = this.splitLegs(list);
+    if (!limitLeg || !stopLeg) {
+      this.logger.error(`order list ${list.id} is malformed (missing leg)`);
+      return;
+    }
+    const limitTerminal = TERMINAL_STATUSES.has(limitLeg.status);
+    const stopTerminal = TERMINAL_STATUSES.has(stopLeg.status);
+
+    if (limitTerminal && stopTerminal) {
+      this.logger.warn(`OCO recovery: finalizing list ${list.id} (both legs terminal)`);
+      await this.onLegTerminal(list.id);
+      return;
+    }
+    if (list.stopPendingAt !== null && !limitTerminal) {
+      this.logger.warn(
+        `OCO recovery: re-emitting CO for limit leg ${limitLeg.id} of list ${list.id}`,
+      );
+      await this.dispatch.dispatchCancelOrder(limitLeg);
+      return;
+    }
+    if (stopLeg.status === 'NEW' && stopLeg.triggeredAt !== null) {
+      this.logger.warn(
+        `OCO recovery: re-emitting NO for armed-but-unsent stop leg ${stopLeg.id} of list ${list.id}`,
+      );
+      await this.dispatch.dispatchNewOrder(stopLeg);
+      return;
+    }
+    if (limitTerminal && stopLeg.status === 'NEW' && stopLeg.triggeredAt === null) {
+      this.logger.warn(`OCO recovery: re-running onLegTerminal for list ${list.id}`);
+      await this.onLegTerminal(list.id);
+      return;
+    }
+    // 크래시 윈도우: createOcoList tx 커밋 후 limit NO 발행 전 크래시 → limit이 엔진에 미전송.
+    // DB상 정상 상태(양 레그 NEW)와 구분 불가하므로 재드라이브 — 엔진 멱등(이미 resting이면 무시).
+    // stop 재arm은 trigger.service onApplicationBootstrap이 담당하므로 여기선 limit만.
+    if (
+      limitLeg.status === 'NEW' &&
+      stopLeg.status === 'NEW' &&
+      stopLeg.triggeredAt === null &&
+      list.stopPendingAt === null
+    ) {
+      this.logger.warn(
+        `OCO recovery: re-dispatching limit leg ${limitLeg.id} of list ${list.id} (crash window)`,
+      );
+      await this.dispatch.dispatchNewOrder(limitLeg);
+    }
+  }
+
+  // ---------- read ----------
+
+  findByUser(userId: string, market: MarketType, limit: number) {
+    const safeLimit = Math.min(Math.max(1, limit), MAX_LIST_QUERY_LIMIT);
+    return this.prisma.orderList.findMany({
+      where: { userId, tickerMarket: market },
+      orderBy: { createdAt: 'desc' },
+      take: safeLimit,
+      include: { orders: true },
+    });
+  }
+
+  async findOneForUser(userId: string, listId: string) {
+    const list = await this.prisma.orderList.findUnique({
+      where: { id: listId },
+      include: { orders: true },
+    });
+    if (!list)
+      throw new DomainException(
+        ErrorCode.ORDER_LIST_NOT_FOUND,
+        'Order list not found',
+        HttpStatus.NOT_FOUND,
+      );
+    if (list.userId !== userId)
+      throw new DomainException(ErrorCode.FORBIDDEN, 'Not your order list', HttpStatus.FORBIDDEN);
+    return list;
+  }
+
+  // ---------- helpers ----------
+
+  /** stop 로컬 취소 후 양 레그 terminal이면 재진입 finalize. */
+  private async cancelStopThenResolve(list: ListWithOrders, stopLeg: Order): Promise<void> {
+    const canceled = await this.cancelStopLegLocally(list, stopLeg);
+    if (canceled) {
+      await this.onLegTerminal(list.id); // 양 레그 terminal → finalize
+    }
+  }
+
+  /** finalize: guarded EXECUTING 전이 + listref 환불 1회 + listStatus emit. */
+  private async finalize(list: ListWithOrders, limitLeg: Order, stopLeg: Order): Promise<void> {
+    // 환불 산정은 순수 함수 — sourceKey unique가 이중 INSERT 차단.
+    const { finalStatus, refundAmount } = resolveFinalization({
+      side: list.side,
+      lockAmount: list.lockAmount,
+      limitStatus: limitLeg.status,
+      stopStatus: stopLeg.status,
+      limitVals: this.finalValuesOf(limitLeg),
+      stopVals: this.finalValuesOf(stopLeg),
+    });
+
+    // 종결 claim + 환불 INSERT를 한 트랜잭션으로 — 둘 사이 크래시 시 리스트 잠금 누수 방지
+    const claimed = await this.prisma.$transaction(async (tx) => {
+      if (!(await this.machine.claimFinalized(list.id, finalStatus, tx))) return false;
+      await this.settlement.recordListRefund(
+        {
+          listId: list.id,
+          userId: list.userId,
+          market: list.tickerMarket,
+          assetSymbol: list.lockAssetSymbol,
+          amount: refundAmount,
+        },
+        tx,
+      );
+      return true;
+    });
+    if (!claimed) return; // 이미 finalize됨
+
+    this.finalLegValues.delete(limitLeg.id);
+    this.finalLegValues.delete(stopLeg.id);
+
+    this.userStream.emitListStatus(list.userId, {
+      orderListId: list.id,
+      symbol: list.tickerSymbol,
+      status: finalStatus,
+      orders: [
+        { orderId: limitLeg.id, status: limitLeg.status },
+        { orderId: stopLeg.id, status: stopLeg.status },
+      ],
+      ts: Date.now(),
+    });
+  }
+
+  /** stop 레그 guarded 로컬 취소 (NEW+미트리거 한정). 성공 시 true. */
+  private async cancelStopLegLocally(list: ListWithOrders, stopLeg: Order): Promise<boolean> {
+    if (!(await this.machine.claimLocalStopCancel(stopLeg.id))) return false;
+
+    this.registry.remove(stopLeg.id);
+    this.finalLegValues.set(stopLeg.id, { eq: ZERO, cqq: ZERO });
+    await this.machine.clearStopPending(list.id);
+    this.reportLocal(stopLeg, 'CANCELED');
+    return true;
+  }
+
+  private finalValuesOf(order: Order): LegFinalValues {
+    // OU 추적값 우선. 없으면(재시작 복구) drain 완료된 DB 값.
+    return (
+      this.finalLegValues.get(order.id) ?? {
+        eq: order.executedQty,
+        cqq: order.cumulativeQuoteQty,
+      }
+    );
+  }
+
+  private async loadList(listId: string): Promise<ListWithOrders | null> {
+    const list = await this.prisma.orderList.findUnique({
+      where: { id: listId },
+      include: { orders: true },
+    });
+    if (!list) this.logger.error(`unknown order list ${listId}`);
+    return list;
+  }
+
+  private splitLegs(list: ListWithOrders): { limitLeg: Order | null; stopLeg: Order | null } {
+    const stopLeg = list.orders.find((o) => o.stopPrice !== null) ?? null;
+    const limitLeg = list.orders.find((o) => o.stopPrice === null) ?? null;
+    if (!stopLeg || !limitLeg) {
+      this.logger.error(`order list ${list.id} is malformed (orders=${list.orders.length})`);
+    }
+    return { limitLeg, stopLeg };
+  }
+
+  private reportLocal(order: Order, status: OrderStatus): void {
+    const meta = this.tickerStats.metaOf(order.tickerMarket, order.tickerSymbol);
+    if (!meta) {
+      this.logger.error(`no ticker meta for ${order.tickerMarket}/${order.tickerSymbol}`);
+      return;
+    }
+    this.userStream.emitExecutionReport(
+      order.userId,
+      buildExecutionReport(order, meta, {
+        executedQty: ZERO,
+        cumulativeQuoteQty: ZERO,
+        status,
+        ts: Date.now(),
+      }),
+    );
+  }
+
+  private async lastPriceOf(market: MarketType, symbol: string): Promise<Decimal | null> {
+    const snap = this.tickerStats.snapshotOne(market, symbol);
+    if (snap?.lastPrice) return new Decimal(snap.lastPrice);
+    const t = await this.prisma.trade.findFirst({
+      where: { tickerSymbol: symbol, tickerMarket: market },
+      orderBy: { seq: 'desc' },
+      select: { price: true },
+    });
+    return t?.price ?? null;
+  }
+}
