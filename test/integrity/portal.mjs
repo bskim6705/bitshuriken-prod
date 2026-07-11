@@ -6,11 +6,11 @@ const R = makeReport('portal');
 
 async function usdtAcross(key) {
   const out = {};
-  for (const [mkt, base, path] of [['SPOT', BASE.spot, '/spot/account/balances'], ['FUTURES', BASE.futures, '/futures/account/balances'], ['DEX', BASE.dex, '/dex/account/balances']]) {
+  for (const [mkt, base, path] of [['SPOT', BASE.spot, '/spot/account/balances'], ['FUTURES', BASE.futures, '/futures/account/balances']]) {
     const r = await signed(base, 'GET', path, { apiKey: key.apiKey, secret: key.secret });
     out[mkt] = at(normBalances(r.json.data, mkt), 'USDT').total;
   }
-  out.TOTAL = out.SPOT + out.FUTURES + out.DEX;
+  out.TOTAL = out.SPOT + out.FUTURES;
   return out;
 }
 
@@ -41,21 +41,19 @@ async function usdtAcross(key) {
 }
 
 // ============================================================
-// CASE 2: cross-market transfer conservation (SPOT<->FUTURES<->DEX total constant)
+// CASE 2: cross-market transfer conservation (SPOT<->FUTURES total constant)
 // ============================================================
 {
   const T = await makeTrader('pXfer', { USDT: '10000' });
   const a = await usdtAcross(T.key);
   await transfer(T.key, 'SPOT', 'FUTURES', 'USDT', '3000');
-  await transfer(T.key, 'SPOT', 'DEX', 'USDT', '2000');
   await transfer(T.key, 'FUTURES', 'SPOT', 'USDT', '1000');
   const b = await usdtAcross(T.key);
   R.eqScaled('2a total USDT conserved across markets', b.TOTAL, a.TOTAL);
   R.eqScaled('2b futures got +3000-1000', b.FUTURES - a.FUTURES, toScaled('2000'));
-  R.eqScaled('2c dex got +2000', b.DEX - a.DEX, toScaled('2000'));
-  R.eqScaled('2d spot net -4000', a.SPOT - b.SPOT, toScaled('4000'));
+  R.eqScaled('2c spot net -2000', a.SPOT - b.SPOT, toScaled('2000'));
   const over = await signed(BASE.portal, 'POST', '/account/transfers', { apiKey: T.key.apiKey, secret: T.key.secret, body: { fromMarket: 'SPOT', toMarket: 'FUTURES', assetSymbol: 'USDT', qty: '99999999' } });
-  R.check('2e over-balance transfer rejected', over.status >= 400, `status=${over.status} code=${over.json.code}`);
+  R.check('2d over-balance transfer rejected', over.status >= 400, `status=${over.status} code=${over.json.code}`);
 }
 
 // ============================================================

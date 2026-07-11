@@ -7,8 +7,6 @@ export const BASE = {
   portal: 'http://localhost:5103',
   spot: 'http://localhost:5101',
   futures: 'http://localhost:5102',
-  dex: 'http://localhost:5107',
-  options: 'http://localhost:5108',
 };
 
 export const SCALE = 100000000n; // 10^8

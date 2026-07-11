@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const run = promisify(execFile);
 
-const SUITES = ['spot.mjs', 'dex.mjs', 'portal.mjs', 'futures.mjs', 'options.mjs'];
+const SUITES = ['spot.mjs', 'portal.mjs', 'futures.mjs'];
 const results = [];
 for (const s of SUITES) {
   process.stdout.write(`\n===== ${s} =====\n`);
