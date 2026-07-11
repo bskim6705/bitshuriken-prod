@@ -133,7 +133,11 @@ if want match; then
     err "python venv missing at bitshuriken-prod-match/venv. create it: python -m venv venv && pip install -r requirements.txt"
     exit 1
   fi
-  start_bg match "source venv/bin/activate && python main.py" "$ROOT/bitshuriken-prod-match"
+  # 프로드처럼 spot/futures 매칭엔진을 분리 기동한다. 단일 인스턴스 + 합본 tickers.json은
+  # 양 마켓에 존재하는 심볼(BTCUSDT 등)에서 LaneRegistry가 심볼만으로 키잉해 lane이 충돌한다
+  # (spot 주문이 futures lane에서 체결). 분리하면 각 인스턴스가 한 마켓만 담아 충돌이 없다.
+  start_bg match-spot "source venv/bin/activate && MATCH_CONFIG_PATH=./config/tickers-spot.json python main.py" "$ROOT/bitshuriken-prod-match"
+  start_bg match-futures "source venv/bin/activate && MATCH_CONFIG_PATH=./config/tickers-futures.json python main.py" "$ROOT/bitshuriken-prod-match"
 fi
 
 # ---- FE ----
