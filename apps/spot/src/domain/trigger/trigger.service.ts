@@ -14,6 +14,7 @@ const ZERO = new Decimal(0);
 const DRAIN_POLL_MS = 500;
 const DRAIN_TIMEOUT_MS = 60_000;
 const RECOVERY_DELAY_MS = 10_000;
+const REDRIVE_DELAY_MS = 5_000;
 
 /**
  * BE 보관 stop 주문의 트리거 평가. 진실은 DB guarded claim — registry는 후보 탐색용.
@@ -23,6 +24,8 @@ const RECOVERY_DELAY_MS = 10_000;
 export class TriggerService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(TriggerService.name);
   private unsubscribe: (() => void) | null = null;
+  // 발화 실패한 OCO 레그 — 다음 trade에서 가격 조건 없이 재발화 (전송 유실 복구)
+  private readonly ocoRedrive = new Set<string>();
 
   constructor(
     private prisma: PrismaService,
@@ -61,7 +64,10 @@ export class TriggerService implements OnApplicationBootstrap, OnModuleDestroy {
     // claim-before-await: 한 sweep의 다중 TR로 인한 이중 트리거 방지 — 제거까지 동기
     const triggered: Order[] = [];
     for (const order of candidates) {
-      if (stopTriggered(order.type, order.side, order.stopPrice!, event.price)) {
+      if (
+        this.ocoRedrive.has(order.id) ||
+        stopTriggered(order.type, order.side, order.stopPrice!, event.price)
+      ) {
         this.registry.remove(order.id);
         triggered.push(order);
       }
@@ -70,14 +76,17 @@ export class TriggerService implements OnApplicationBootstrap, OnModuleDestroy {
     for (const order of triggered) {
       void this.fire(order).catch((e) => {
         this.logger.error(`failed to fire triggered stop order ${order.id}`, e as Error);
-        this.registry.add(order); // 복원 — 다음 trade에서 재평가
+        this.registry.add(order); // 복원 — 다음 trade에서 재시도
+        if (order.orderListId !== null) this.ocoRedrive.add(order.id);
       });
     }
   }
 
   private async fire(order: Order): Promise<void> {
     if (order.orderListId !== null) {
-      await this.orderLists.onStopTriggered(order);
+      // delete가 true = 직전 발화가 전송 실패 — 리스트 쪽에 유실 메시지 재드라이브를 지시
+      const redrive = this.ocoRedrive.delete(order.id);
+      await this.orderLists.onStopTriggered(order, redrive);
       return;
     }
 
@@ -88,22 +97,52 @@ export class TriggerService implements OnApplicationBootstrap, OnModuleDestroy {
     });
     if (claim.count === 0) return; // 취소가 선점
 
-    await this.dispatch.dispatchNewOrder(order);
-
-    const meta = this.tickerStats.metaOf(order.tickerMarket, order.tickerSymbol);
-    if (meta) {
-      this.userStream.emitExecutionReport(
-        order.userId,
-        buildExecutionReport(order, meta, {
-          executedQty: ZERO,
-          cumulativeQuoteQty: ZERO,
-          status: 'NEW',
-          ts: Date.now(),
-        }),
+    try {
+      await this.dispatch.dispatchNewOrder(order);
+    } catch (e) {
+      // claim은 유지한 채 주기 재전송 — 실패 시 armed-but-unsent로 부팅까지 고착되는 것 방지
+      this.logger.error(
+        `failed to send NO for stop order ${order.id} — starting redrive`,
+        e as Error,
       );
-    } else {
-      this.logger.error(`no ticker meta for ${order.tickerMarket}/${order.tickerSymbol}`);
+      void this.redriveArmedNo(order.id);
+      return;
     }
+    this.emitTriggeredReport(order);
+  }
+
+  /** 전송 실패한 armed 주문의 주기 재전송. 취소/OU로 status가 NEW를 벗어나면 중단. */
+  private async redriveArmedNo(orderId: string): Promise<void> {
+    for (;;) {
+      await sleep(REDRIVE_DELAY_MS);
+      const order = await this.prisma.order.findUnique({ where: { id: orderId } });
+      if (!order || order.status !== 'NEW' || order.triggeredAt === null) return;
+      try {
+        await this.dispatch.dispatchNewOrder(order);
+      } catch (e) {
+        this.logger.error(`NO redrive failed for stop order ${orderId} — retrying`, e as Error);
+        continue;
+      }
+      this.emitTriggeredReport(order);
+      return;
+    }
+  }
+
+  private emitTriggeredReport(order: Order): void {
+    const meta = this.tickerStats.metaOf(order.tickerMarket, order.tickerSymbol);
+    if (!meta) {
+      this.logger.error(`no ticker meta for ${order.tickerMarket}/${order.tickerSymbol}`);
+      return;
+    }
+    this.userStream.emitExecutionReport(
+      order.userId,
+      buildExecutionReport(order, meta, {
+        executedQty: ZERO,
+        cumulativeQuoteQty: ZERO,
+        status: 'NEW',
+        ts: Date.now(),
+      }),
+    );
   }
 
   // ---------- boot recovery ----------

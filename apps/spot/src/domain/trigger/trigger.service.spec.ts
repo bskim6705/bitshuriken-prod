@@ -79,6 +79,10 @@ class FakePrisma {
       );
       return Promise.resolve(rows.map((r) => ({ ...r })));
     },
+    findUnique: (args: { where: { id: string } }) => {
+      const row = this.orders.get(args.where.id);
+      return Promise.resolve(row ? { ...row } : null);
+    },
     updateMany: (args: { where: Row; data: Row }) => {
       let count = 0;
       for (const row of this.orders.values()) {
@@ -341,22 +345,106 @@ describe('TriggerService (박제)', () => {
     expect(h.registry.size()).toBe(0);
   });
 
-  it('NO 전송 실패: registry 복원되지만 claim이 이미 armed — 세션 내 재발화는 무전송(부트 복구 의존)', async () => {
+  it('OCO 레그 발화 실패: registry 복원 + 다음 trade에서 가격 무관 재발화(redrive=true)', async () => {
     const db = new FakePrisma();
-    const order = db.makeOrder({ stopPrice: d(48000) });
+    const leg = db.makeOrder({
+      type: 'STOP_LOSS_LIMIT',
+      price: d(47900),
+      stopPrice: d(48000),
+      orderListId: 'L1',
+    });
     const h = makeService(db);
     await bootstrap(h);
-    h.dispatch.dispatchNewOrder.mockRejectedValueOnce(new Error('kafka down'));
+    h.orderLists.onStopTriggered.mockRejectedValueOnce(new Error('kafka down'));
 
     h.emit(trade('47000'));
     await flush();
-    expect(h.dispatch.dispatchNewOrder).toHaveBeenCalledTimes(1); // 실패한 1회
+    expect(h.orderLists.onStopTriggered).toHaveBeenCalledTimes(1);
+    expect(h.orderLists.onStopTriggered).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: leg.id }),
+      false,
+    );
     expect(h.registry.size()).toBe(1); // 복원됨
-    expect(db.orders.get(order.id)!.triggeredAt).toBeInstanceOf(Date); // 이미 armed
 
-    h.emit(trade('47000'));
+    h.emit(trade('49000')); // stop(48000) 미충족 가격 — 유실 복구는 가격 조건 없이 재발화
     await flush();
-    expect(h.dispatch.dispatchNewOrder).toHaveBeenCalledTimes(1); // claim 0 → 재전송 없음
+    expect(h.orderLists.onStopTriggered).toHaveBeenCalledTimes(2);
+    expect(h.orderLists.onStopTriggered).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: leg.id }),
+      true,
+    );
+    expect(h.registry.size()).toBe(0);
+  });
+
+  // ---------- NO 전송 실패 redrive (claim 유지 + 5s 주기 재전송) ----------
+
+  describe('NO 전송 실패 redrive', () => {
+    beforeEach(() => {
+      jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    });
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('전송 실패: claim 유지·registry 미복원, 5s 후 재전송 성공 + 리포트 1회', async () => {
+      const db = new FakePrisma();
+      const order = db.makeOrder({ stopPrice: d(48000) });
+      const h = makeService(db);
+      await bootstrap(h);
+      h.dispatch.dispatchNewOrder.mockRejectedValueOnce(new Error('kafka down'));
+
+      h.emit(trade('47000'));
+      await flush();
+      expect(h.dispatch.dispatchNewOrder).toHaveBeenCalledTimes(1); // 실패한 1회
+      expect(db.orders.get(order.id)!.triggeredAt).toBeInstanceOf(Date); // claim 유지
+      expect(h.registry.size()).toBe(0); // redrive 루프가 소유
+      expect(h.userStream.emitExecutionReport).not.toHaveBeenCalled();
+
+      await jest.advanceTimersByTimeAsync(5_000);
+      expect(dispatchedIds(h.dispatch.dispatchNewOrder)).toEqual([order.id, order.id]);
+      expect(h.userStream.emitExecutionReport).toHaveBeenCalledTimes(1);
+      expect(h.userStream.emitExecutionReport).toHaveBeenCalledWith(
+        USER,
+        expect.objectContaining({ orderId: order.id, status: 'NEW' }),
+      );
+    });
+
+    it('재전송 연속 실패: 성공할 때까지 5s 간격 반복, 성공 후 루프 종료', async () => {
+      const db = new FakePrisma();
+      const order = db.makeOrder({ stopPrice: d(48000) });
+      const h = makeService(db);
+      await bootstrap(h);
+      h.dispatch.dispatchNewOrder
+        .mockRejectedValueOnce(new Error('kafka down'))
+        .mockRejectedValueOnce(new Error('kafka down'));
+
+      h.emit(trade('47000'));
+      await flush();
+      await jest.advanceTimersByTimeAsync(5_000); // 재시도 1 — 실패
+      expect(h.dispatch.dispatchNewOrder).toHaveBeenCalledTimes(2);
+      await jest.advanceTimersByTimeAsync(5_000); // 재시도 2 — 성공
+      expect(h.dispatch.dispatchNewOrder).toHaveBeenCalledTimes(3);
+      expect(dispatchedIds(h.dispatch.dispatchNewOrder).every((id) => id === order.id)).toBe(true);
+
+      await jest.advanceTimersByTimeAsync(10_000); // 종료 확인 — 추가 전송 없음
+      expect(h.dispatch.dispatchNewOrder).toHaveBeenCalledTimes(3);
+    });
+
+    it('redrive 중단: 대기 중 status가 NEW를 벗어나면(취소/OU) 재전송 없음', async () => {
+      const db = new FakePrisma();
+      const order = db.makeOrder({ stopPrice: d(48000) });
+      const h = makeService(db);
+      await bootstrap(h);
+      h.dispatch.dispatchNewOrder.mockRejectedValueOnce(new Error('kafka down'));
+
+      h.emit(trade('47000'));
+      await flush();
+      db.orders.get(order.id)!.status = 'CANCELED';
+
+      await jest.advanceTimersByTimeAsync(15_000);
+      expect(h.dispatch.dispatchNewOrder).toHaveBeenCalledTimes(1);
+      expect(h.userStream.emitExecutionReport).not.toHaveBeenCalled();
+    });
   });
 
   // ---------- 라우팅 / 기타 ----------

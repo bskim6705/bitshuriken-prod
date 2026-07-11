@@ -280,24 +280,40 @@ export class OrderListService {
     }
   }
 
-  /** Flow B step 1: stop 트리거됨 → limit 레그 취소 요청. (registry에서 stop은 이미 동기 제거됨) */
-  async onStopTriggered(stopLeg: Order): Promise<void> {
+  /**
+   * Flow B step 1: stop 트리거됨 → limit 레그 취소 요청. (registry에서 stop은 이미 동기 제거됨)
+   * redrive = 직전 발화가 전송 실패로 끝남 — claim만 잡히고 유실된 CO/NO를 재드라이브한다.
+   */
+  async onStopTriggered(stopLeg: Order, redrive = false): Promise<void> {
     if (!stopLeg.orderListId) {
       throw new Error(`onStopTriggered called for non-OCO order ${stopLeg.id}`);
     }
     const list = await this.loadList(stopLeg.orderListId);
     if (!list) return;
-    const { limitLeg } = this.splitLegs(list);
-    if (!limitLeg) return;
+    const { limitLeg, stopLeg: stopRow } = this.splitLegs(list);
+    if (!limitLeg || !stopRow) return;
 
     // limit이 이미 terminal이면 즉시 step 2 — 엔진은 unknown CO에 무응답이므로 OU를 기다리지 않는다.
     if (TERMINAL_STATUSES.has(limitLeg.status)) {
+      // 재발화 + 이미 armed = arming NO가 유실됐을 수 있음 — 재드라이브(엔진 멱등) 후 취소 재확인
+      if (redrive && stopRow.status === 'NEW' && stopRow.triggeredAt !== null) {
+        await this.dispatch.dispatchNewOrder(stopRow);
+        this.reportLocal(stopRow, 'NEW');
+        await this.redriveCancelIfRequested(list.id, stopRow);
+        return;
+      }
       await this.onLegTerminal(list.id);
       return;
     }
 
     const claimed = await this.machine.claimStopPending(list.id);
-    if (!claimed) return; // 이미 진행 중이거나 취소 요청됨
+    if (!claimed) {
+      // 재발화 경로: claim만 커밋되고 limit CO가 유실됐을 수 있음 — 재전송 (중복 CO는 엔진이 무시)
+      if (redrive && list.stopPendingAt !== null && !list.cancelRequested) {
+        await this.dispatch.dispatchCancelOrder(limitLeg);
+      }
+      return;
+    }
 
     await this.dispatch.dispatchCancelOrder(limitLeg);
   }
@@ -345,6 +361,8 @@ export class OrderListService {
           await this.machine.clearStopPending(list.id);
           await this.dispatch.dispatchNewOrder(stopLeg);
           this.reportLocal(stopLeg, 'NEW'); // arming 후 executionReport
+          // NO ack 후 취소 재확인 — 그 사이 나간 cancelList의 CO는 NO를 앞질러 무시됐을 수 있다
+          await this.redriveCancelIfRequested(list.id, stopLeg);
           return;
         }
         // claim 0: 취소와의 레이스 패배 → 로컬 취소 경로로
@@ -447,6 +465,23 @@ export class OrderListService {
 
     if (limitTerminal && stopTerminal) {
       this.logger.warn(`OCO recovery: finalizing list ${list.id} (both legs terminal)`);
+      await this.onLegTerminal(list.id);
+      return;
+    }
+    // 유저 취소 접수 후 CO가 유실됐을 수 있음(크래시 / NO 앞지름) — 취소를 재드라이브
+    if (list.cancelRequested) {
+      this.logger.warn(`OCO recovery: re-driving cancel for list ${list.id}`);
+      if (!stopTerminal) {
+        if (stopLeg.status === 'NEW' && stopLeg.triggeredAt === null) {
+          const canceled = await this.cancelStopLegLocally(list, stopLeg);
+          if (!canceled) await this.dispatch.dispatchCancelOrder(stopLeg);
+        } else {
+          // armed NEW는 NO 미전송 가능성 — NO 재드라이브(엔진 멱등) 후 CO로 취소 확정
+          if (stopLeg.status === 'NEW') await this.dispatch.dispatchNewOrder(stopLeg);
+          await this.dispatch.dispatchCancelOrder(stopLeg);
+        }
+      }
+      if (!limitTerminal) await this.dispatch.dispatchCancelOrder(limitLeg);
       await this.onLegTerminal(list.id);
       return;
     }
@@ -565,6 +600,25 @@ export class OrderListService {
       ],
       ts: Date.now(),
     });
+  }
+
+  /**
+   * arming NO ack 후 취소 요청 재확인. 전송 호출 간 순서 미보장이라 cancelList의 CO가
+   * NO를 앞질러 엔진에서 무시될 수 있다 — 취소 요청이 있으면 NO 뒤에 CO를 다시 보낸다.
+   * 원래 CO가 늦게 도착해 중복돼도 엔진이 unknown CO를 무시하므로 무해.
+   */
+  private async redriveCancelIfRequested(listId: string, stopLeg: Order): Promise<void> {
+    const fresh = await this.prisma.orderList.findUnique({
+      where: { id: listId },
+      select: { cancelRequested: true },
+    });
+    if (!fresh?.cancelRequested) return;
+    try {
+      await this.dispatch.dispatchCancelOrder(stopLeg);
+    } catch (e) {
+      // 부트 복구의 cancelRequested 재드라이브가 백스톱
+      this.logger.error(`post-arm cancel redrive failed for list ${listId}`, e as Error);
+    }
   }
 
   /** stop 레그 guarded 로컬 취소 (NEW+미트리거 한정). 성공 시 true. */

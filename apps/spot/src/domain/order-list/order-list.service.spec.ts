@@ -746,6 +746,84 @@ describe('OrderListService (OCO 박제)', () => {
     expect(refunds[0].amount.toFixed()).toBe('0.1');
   });
 
+  it('취소 vs arming 레이스(NO 전송 중 취소 claim): NO ack 후 재확인 → stop 추격 CO', async () => {
+    const db = new FakePrisma();
+    const { list, limit, stop } = db.seedOco({ list: { stopPendingAt: new Date() } });
+    const h = makeService(db);
+    // NO 전송 사이에 cancelList의 cancelRequested claim이 커밋되는 인터리빙 재현
+    h.dispatch.dispatchNewOrder.mockImplementation(() => {
+      db.lists.get(list.id)!.cancelRequested = true;
+      return Promise.resolve();
+    });
+
+    db.orders.get(limit.id)!.status = 'CANCELED';
+    await h.service.onLegTerminal(list.id, { orderId: limit.id, eq: d(0), cqq: d(0) }); // arming
+
+    expect(dispatchedOrder(h.dispatch.dispatchNewOrder).id).toBe(stop.id);
+    // 앞질러 무시됐을 취소 CO를 NO 뒤 순서로 재전송
+    expect(h.dispatch.dispatchCancelOrder).toHaveBeenCalledTimes(1);
+    expect(dispatchedOrder(h.dispatch.dispatchCancelOrder).id).toBe(stop.id);
+
+    // 이후 엔진 CO 결과(OU C)로 정상 종결 — 전액 환불, 유저 취소 관철
+    db.orders.get(stop.id)!.status = 'CANCELED';
+    await h.service.onLegTerminal(list.id, { orderId: stop.id, eq: d(0), cqq: d(0) });
+    expect(db.lists.get(list.id)!.status).toBe('ALL_DONE');
+    expect(refundCalls(h)[0].amount.toFixed()).toBe('0.1');
+  });
+
+  it('arming 시 취소 요청 없음: 추격 CO 없음', async () => {
+    const db = new FakePrisma();
+    const { list, limit } = db.seedOco({ list: { stopPendingAt: new Date() } });
+    const h = makeService(db);
+
+    db.orders.get(limit.id)!.status = 'CANCELED';
+    await h.service.onLegTerminal(list.id, { orderId: limit.id, eq: d(0), cqq: d(0) });
+
+    expect(h.dispatch.dispatchNewOrder).toHaveBeenCalledTimes(1);
+    expect(h.dispatch.dispatchCancelOrder).not.toHaveBeenCalled();
+  });
+
+  // ---------- 발화 실패 재드라이브 (trigger가 redrive=true로 재발화) ----------
+
+  it('onStopTriggered redrive: claim 선점(stopPendingAt) 상태 → 유실된 limit CO 재전송', async () => {
+    const db = new FakePrisma();
+    const { limit, stop } = db.seedOco({ list: { stopPendingAt: new Date() } });
+    const h = makeService(db);
+
+    await h.service.onStopTriggered(db.orders.get(stop.id) as never, true);
+
+    expect(h.dispatch.dispatchCancelOrder).toHaveBeenCalledTimes(1);
+    expect(dispatchedOrder(h.dispatch.dispatchCancelOrder).id).toBe(limit.id);
+  });
+
+  it('onStopTriggered redrive: cancelRequested면 재드라이브 안 함 (취소 경로 소관)', async () => {
+    const db = new FakePrisma();
+    const { stop } = db.seedOco({
+      list: { stopPendingAt: new Date(), cancelRequested: true },
+    });
+    const h = makeService(db);
+
+    await h.service.onStopTriggered(db.orders.get(stop.id) as never, true);
+
+    expect(h.dispatch.dispatchCancelOrder).not.toHaveBeenCalled();
+  });
+
+  it('onStopTriggered redrive: limit terminal + armed NEW stop → stop NO 재드라이브 + 리포트', async () => {
+    const db = new FakePrisma();
+    const { stop } = db.seedOco({
+      limit: { status: 'CANCELED' },
+      stop: { triggeredAt: new Date() },
+    });
+    const h = makeService(db);
+
+    await h.service.onStopTriggered(db.orders.get(stop.id) as never, true);
+
+    expect(h.dispatch.dispatchNewOrder).toHaveBeenCalledTimes(1);
+    expect(dispatchedOrder(h.dispatch.dispatchNewOrder).id).toBe(stop.id);
+    expect(reportsOf(h, stop.id)).toEqual([expect.objectContaining({ status: 'NEW' })]);
+    expect(h.dispatch.dispatchCancelOrder).not.toHaveBeenCalled(); // 취소 요청 없음 — 추격 CO 없음
+  });
+
   // ---------- 복구 / 기타 ----------
 
   it('복구 전 hint 없는 terminal 레그: 결정 보류 — finalize/arming 미실행', async () => {
@@ -786,6 +864,63 @@ describe('OrderListService (OCO 박제)', () => {
 
     expect(h.dispatch.dispatchNewOrder).toHaveBeenCalledTimes(1);
     expect(dispatchedOrder(h.dispatch.dispatchNewOrder).id).toBe(stop.id);
+  });
+
+  it('부트 복구: cancelRequested + armed NEW stop → NO 재드라이브 후 CO (취소 관철)', async () => {
+    const db = new FakePrisma();
+    const { list, stop } = db.seedOco({
+      list: { cancelRequested: true },
+      limit: { status: 'CANCELED' },
+      stop: { triggeredAt: new Date() },
+    });
+    const h = makeService(db);
+
+    await h.service.runBootRecovery();
+
+    expect(h.dispatch.dispatchNewOrder).toHaveBeenCalledTimes(1);
+    expect(dispatchedOrder(h.dispatch.dispatchNewOrder).id).toBe(stop.id);
+    expect(h.dispatch.dispatchCancelOrder).toHaveBeenCalledTimes(1);
+    expect(dispatchedOrder(h.dispatch.dispatchCancelOrder).id).toBe(stop.id);
+    // NO가 CO보다 먼저 — 같은 파티션에서 순서 보장돼 엔진이 취소를 인지
+    expect(h.dispatch.dispatchNewOrder.mock.invocationCallOrder[0]).toBeLessThan(
+      h.dispatch.dispatchCancelOrder.mock.invocationCallOrder[0],
+    );
+    expect(db.lists.get(list.id)!.status).toBe('EXECUTING'); // stop OU 대기
+  });
+
+  it('부트 복구: cancelRequested + 미트리거 stop → stop 로컬 취소 + limit CO', async () => {
+    const db = new FakePrisma();
+    const { list, limit, stop } = db.seedOco({
+      list: { cancelRequested: true },
+      limit: { status: 'OPEN' },
+    });
+    const h = makeService(db);
+    h.registry.add(db.orders.get(stop.id) as never);
+
+    await h.service.runBootRecovery();
+
+    expect(db.orders.get(stop.id)!.status).toBe('CANCELED');
+    expect(h.registry.size()).toBe(0);
+    expect(h.dispatch.dispatchNewOrder).not.toHaveBeenCalled();
+    expect(h.dispatch.dispatchCancelOrder).toHaveBeenCalledTimes(1);
+    expect(dispatchedOrder(h.dispatch.dispatchCancelOrder).id).toBe(limit.id);
+    expect(db.lists.get(list.id)!.status).toBe('EXECUTING'); // limit OU 대기
+  });
+
+  it('부트 복구: cancelRequested + 엔진 거주 stop(OPEN) → CO만 재전송 (NO 없음)', async () => {
+    const db = new FakePrisma();
+    const { stop } = db.seedOco({
+      list: { cancelRequested: true },
+      limit: { status: 'CANCELED' },
+      stop: { status: 'OPEN', triggeredAt: new Date() },
+    });
+    const h = makeService(db);
+
+    await h.service.runBootRecovery();
+
+    expect(h.dispatch.dispatchNewOrder).not.toHaveBeenCalled();
+    expect(h.dispatch.dispatchCancelOrder).toHaveBeenCalledTimes(1);
+    expect(dispatchedOrder(h.dispatch.dispatchCancelOrder).id).toBe(stop.id);
   });
 
   it('부트 복구: 양 레그 terminal + EXECUTING → DB eq/cqq로 finalize (잠금 누수 방지)', async () => {
