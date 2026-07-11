@@ -349,6 +349,41 @@
       "partition": 5,
       "pricePrecision": 2,
       "qtyPrecision": 3
+    },
+    {
+      "market": "spot",
+      "symbol": "USDTKRW",
+      "partition": 3,
+      "pricePrecision": 0,
+      "qtyPrecision": 4
+    },
+    {
+      "market": "spot",
+      "symbol": "BTCKRW",
+      "partition": 0,
+      "pricePrecision": 0,
+      "qtyPrecision": 8
+    },
+    {
+      "market": "spot",
+      "symbol": "ETHKRW",
+      "partition": 2,
+      "pricePrecision": 0,
+      "qtyPrecision": 8
+    },
+    {
+      "market": "spot",
+      "symbol": "XRPKRW",
+      "partition": 3,
+      "pricePrecision": 0,
+      "qtyPrecision": 8
+    },
+    {
+      "market": "spot",
+      "symbol": "SOLKRW",
+      "partition": 1,
+      "pricePrecision": 0,
+      "qtyPrecision": 8
     }
   ]
 }
