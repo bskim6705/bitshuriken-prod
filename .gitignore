@@ -3,6 +3,9 @@
 /bitshuriken-prod-fe/
 /bitshuriken-prod-match/
 /bitshuriken-prod-infra/
+# 외부 클라이언트 서비스 (봇·전략) — 각자 독립 레포, 코어 스택 밖 (feedback-023)
+/bitshuriken-prod-bots/
+/bitshuriken-prod-agents/
 
 # dev 런타임 산출물
 /logs/
