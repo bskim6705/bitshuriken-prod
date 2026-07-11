@@ -14,6 +14,7 @@ import { PrivateGuard } from '@app/core-domain/auth/guards/private.guard';
 import { RequireApiScope, ApiScope } from '@app/shared/decorators/api-scope.decorator';
 import { FundingService } from './funding.service';
 import { FundingDto } from './dto/funding.dto';
+import { SecurityNotifyService } from '../../notify/security-notify.service';
 
 // Excluded from the API reference: dev-only simulated funding (no on-chain flow).
 @ApiExcludeController()
@@ -25,7 +26,10 @@ import { FundingDto } from './dto/funding.dto';
 @RequireApiScope(ApiScope.TRADE)
 @Controller('account')
 export class FundingController {
-  constructor(private readonly fundingService: FundingService) {}
+  constructor(
+    private readonly fundingService: FundingService,
+    private readonly notify: SecurityNotifyService,
+  ) {}
 
   @Post('deposits')
   @ApiOperation({ summary: 'Deposit into spot wallet (dev: instant credit, no chain)' })
@@ -68,7 +72,9 @@ export class FundingController {
     description: 'Insufficient balance.',
     example: { code: 2001, message: 'Insufficient balance', data: null },
   })
-  withdraw(@CurrentUser() user: CurrentUserPayload, @Body() dto: FundingDto) {
-    return this.fundingService.withdraw(user.userId, dto);
+  async withdraw(@CurrentUser() user: CurrentUserPayload, @Body() dto: FundingDto) {
+    const result = await this.fundingService.withdraw(user.userId, dto);
+    this.notify.withdrawalConfirmation(user.email, result.assetSymbol, result.qty);
+    return result;
   }
 }

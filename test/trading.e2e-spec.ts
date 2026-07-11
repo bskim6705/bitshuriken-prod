@@ -144,6 +144,12 @@ describe('Trading (e2e)', () => {
     await prisma.authToken.deleteMany({
       where: { userId: { in: [aliceId, bobId] } },
     }); // signup creates an email-verify token (FK)
+    await prisma.session.deleteMany({
+      where: { userId: { in: [aliceId, bobId] } },
+    });
+    await prisma.loginHistory.deleteMany({
+      where: { userId: { in: [aliceId, bobId] } },
+    });
     await prisma.user.deleteMany({
       where: { email: { in: [aliceEmail, bobEmail] } },
     });

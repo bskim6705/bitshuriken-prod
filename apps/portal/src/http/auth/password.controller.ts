@@ -13,13 +13,17 @@ import { JwtOnlyGuard } from '@app/core-domain/auth/guards/jwt-only.guard';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { SecurityNotifyService } from '../../notify/security-notify.service';
 
 // Excluded from the API reference: website-only account management (Binance parity).
 @ApiExcludeController()
 @ApiTags('auth/password')
 @Controller('auth/password')
 export class PasswordController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly notify: SecurityNotifyService,
+  ) {}
 
   @Post('forgot')
   @HttpCode(200)
@@ -37,7 +41,8 @@ export class PasswordController {
   @ApiOperation({ summary: 'Reset password using the token from the email' })
   @ApiResponse({ status: 200, example: { code: 0, message: 'ok', data: { ok: true } } })
   async reset(@Body() dto: ResetPasswordDto) {
-    await this.authService.resetPassword(dto.token, dto.password);
+    const { email } = await this.authService.resetPassword(dto.token, dto.password);
+    this.notify.passwordChanged(email);
     return { ok: true };
   }
 
@@ -45,10 +50,17 @@ export class PasswordController {
   @HttpCode(200)
   @UseGuards(JwtOnlyGuard)
   @ApiCookieAuth('cookieAuth')
-  @ApiOperation({ summary: 'Change password (requires current password; web session only)' })
+  @ApiOperation({ summary: 'Change password (requires current password + TOTP if 2FA; web session only)' })
   @ApiResponse({ status: 200, example: { code: 0, message: 'ok', data: { ok: true } } })
   async change(@CurrentUser() user: CurrentUserPayload, @Body() dto: ChangePasswordDto) {
-    await this.authService.changePassword(user.userId, dto.oldPassword, dto.newPassword);
+    const { email } = await this.authService.changePassword(
+      user.userId,
+      dto.oldPassword,
+      dto.newPassword,
+      dto.totpCode,
+      user.sessionId,
+    );
+    this.notify.passwordChanged(email);
     return { ok: true };
   }
 }

@@ -8,12 +8,18 @@ import {
 } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { AuthService } from '@app/core-domain/auth/auth.service';
+import type { LoginContext } from '@app/core-domain/auth/auth.service';
 import { AuthSessionService } from '@app/core-domain/auth/auth-session.service';
 import { SignupDto } from '@app/core-domain/auth/dto/signup.dto';
 import { LoginDto } from '@app/core-domain/auth/dto/login.dto';
 import { JwtOnlyGuard } from '@app/core-domain/auth/guards/jwt-only.guard';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { SecurityNotifyService } from '../../notify/security-notify.service';
+
+function loginContext(req: Request): LoginContext {
+  return { ip: req.ip ?? 'unknown', userAgent: req.header('user-agent') ?? null };
+}
 
 // Excluded from the API reference: website session / account-management flows
 // (signup/login/2FA/etc.) are not part of the programmatic API (Binance parity).
@@ -24,6 +30,7 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly session: AuthSessionService,
+    private readonly notify: SecurityNotifyService,
   ) {}
 
   @Post('signup')
@@ -41,8 +48,12 @@ export class AuthController {
       },
     },
   })
-  async signup(@Body() dto: SignupDto, @Res({ passthrough: true }) res: Response) {
-    const { accessToken, user } = await this.authService.signup(dto);
+  async signup(
+    @Body() dto: SignupDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { accessToken, user } = await this.authService.signup(dto, loginContext(req));
     this.session.setSession(res, accessToken);
     return user;
   }
@@ -67,9 +78,15 @@ export class AuthController {
     description: 'Invalid credentials.',
     example: { code: 1002, message: 'Invalid credentials', data: null },
   })
-  async login(@Body() dto: LoginDto, @Res({ passthrough: true }) res: Response) {
-    const { accessToken, user } = await this.authService.login(dto);
+  async login(
+    @Body() dto: LoginDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const ctx = loginContext(req);
+    const { accessToken, user, newIp } = await this.authService.login(dto, ctx);
     this.session.setSession(res, accessToken);
+    if (newIp) this.notify.loginAlert(user.email, ctx.ip, ctx.userAgent);
     return user;
   }
 
@@ -102,7 +119,9 @@ export class AuthController {
     description: 'Session cleared.',
     example: { code: 0, message: 'ok', data: { ok: true } },
   })
-  logout(@Res({ passthrough: true }) res: Response) {
+  async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    // 서버측 세션도 revoke — best-effort(토큰 만료/부재여도 쿠키는 항상 정리).
+    await this.authService.logout(this.session.extractToken(req));
     this.session.clearSession(res);
     return { ok: true };
   }

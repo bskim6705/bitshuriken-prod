@@ -7,6 +7,7 @@ import { MailModule } from '../mail/mail.module';
 import { TwoFactorModule } from '../two-factor/two-factor.module';
 import { AuthService } from './auth.service';
 import { AuthSessionService } from './auth-session.service';
+import { SessionService } from './session.service';
 import { JwtStrategy } from './jwt.strategy';
 import { JwtOnlyGuard } from './guards/jwt-only.guard';
 import { ApiKeyOnlyGuard } from './guards/api-key-only.guard';
@@ -33,6 +34,7 @@ if (!secret) throw new Error('JWT_SECRET is required');
   providers: [
     AuthService,
     AuthSessionService,
+    SessionService,
     JwtStrategy,
     JwtOnlyGuard,
     ApiKeyOnlyGuard,
@@ -43,6 +45,7 @@ if (!secret) throw new Error('JWT_SECRET is required');
   exports: [
     AuthService,
     AuthSessionService,
+    SessionService,
     JwtOnlyGuard,
     ApiKeyOnlyGuard,
     PrivateGuard,

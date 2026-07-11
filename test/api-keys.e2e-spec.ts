@@ -19,6 +19,7 @@ interface ApiKeyListItem {
   canTrade: boolean;
   canRead: boolean;
   ipWhitelist: string[];
+  expiresAt: string | null;
   createdAt: string;
   lastUsedAt: string | null;
 }
@@ -62,6 +63,8 @@ describe('API key (e2e)', () => {
   afterAll(async () => {
     await prisma.apiKey.deleteMany({ where: { userId } });
     await prisma.authToken.deleteMany({ where: { userId } }); // signup creates an email-verify token (FK)
+    await prisma.session.deleteMany({ where: { userId } });
+    await prisma.loginHistory.deleteMany({ where: { userId } });
     await prisma.user.deleteMany({ where: { email: testEmail } });
     await app.close();
   });
@@ -288,6 +291,47 @@ describe('API key (e2e)', () => {
 
     it('reject when neither JWT nor X-API-KEY present', async () => {
       await request(app.getHttpServer()).get(`/spot/account/balances`).expect(401);
+    });
+  });
+
+  describe('IP whitelist + expiry', () => {
+    const API_KEY_IP_REJECTED = 60019;
+
+    it('rejects a signed request whose IP is not in the allowlist', async () => {
+      // 존재하지 않는 IP만 허용 → 루프백에서 온 요청은 거부돼야 한다
+      const issueRes = await request(app.getHttpServer())
+        .post('/auth/api-keys')
+        .set('Authorization', `Bearer ${jwtToken}`)
+        .send({ label: 'ip-locked', canRead: true, ipWhitelist: ['203.0.113.99'] })
+        .expect(201);
+      const issued = (issueRes.body as ApiResponse<IssuedApiKey>).data!;
+
+      const ts = Date.now();
+      const qs = `timestamp=${ts}`;
+      const sig = sign(issued.secret, qs);
+
+      const res = await request(app.getHttpServer())
+        .get(`/spot/account/balances?${qs}&signature=${sig}`)
+        .set('X-API-KEY', issued.apiKey)
+        .expect(401);
+      expect((res.body as ApiResponse<unknown>).code).toBe(API_KEY_IP_REJECTED);
+    });
+
+    it('surfaces expiresAt in the key list when created with expiresInDays', async () => {
+      await request(app.getHttpServer())
+        .post('/auth/api-keys')
+        .set('Authorization', `Bearer ${jwtToken}`)
+        .send({ label: 'expiring', canRead: true, expiresInDays: 90 })
+        .expect(201);
+
+      const listRes = await request(app.getHttpServer())
+        .get('/auth/api-keys')
+        .set('Authorization', `Bearer ${jwtToken}`)
+        .expect(200);
+      const keys = (listRes.body as ApiResponse<ApiKeyListItem[]>).data!;
+      const expiring = keys.find((k) => k.label === 'expiring');
+      expect(expiring).toBeDefined();
+      expect(expiring!.expiresAt).not.toBeNull();
     });
   });
 });

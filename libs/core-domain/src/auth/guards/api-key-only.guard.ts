@@ -97,6 +97,7 @@ export class ApiKeyOnlyGuard implements CanActivate {
       queryString: queryStringForSign,
       body,
       providedSignature: signature,
+      ip: req.ip, // trust proxy 설정됨 → 실제 클라이언트 IP (ipWhitelist 대조)
     });
 
     // 권한 범위 강제 — endpoint 미지정 시 READ. TRADE는 canTrade, READ는 canRead 필요.

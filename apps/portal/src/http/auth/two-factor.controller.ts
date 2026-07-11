@@ -11,6 +11,7 @@ import type { CurrentUserPayload } from '@app/shared/decorators/current-user.dec
 import { TwoFactorService } from '@app/core-domain/two-factor/two-factor.service';
 import { JwtOnlyGuard } from '@app/core-domain/auth/guards/jwt-only.guard';
 import { TwoFactorCodeDto } from './dto/two-factor-code.dto';
+import { SecurityNotifyService } from '../../notify/security-notify.service';
 
 /**
  * TOTP 2FA 관리. 웹 세션(JWT) 전용 — API key로 2FA를 켜고 끄는 escalation 차단.
@@ -22,7 +23,10 @@ import { TwoFactorCodeDto } from './dto/two-factor-code.dto';
 @UseGuards(JwtOnlyGuard)
 @Controller('auth/2fa')
 export class TwoFactorController {
-  constructor(private readonly twoFactor: TwoFactorService) {}
+  constructor(
+    private readonly twoFactor: TwoFactorService,
+    private readonly notify: SecurityNotifyService,
+  ) {}
 
   @Post('setup')
   @ApiOperation({ summary: 'Begin 2FA setup — returns otpauth URI + QR (secret shown once)' })
@@ -49,6 +53,7 @@ export class TwoFactorController {
   @ApiResponse({ status: 200, example: { code: 0, message: 'ok', data: { ok: true } } })
   async enable(@CurrentUser() user: CurrentUserPayload, @Body() dto: TwoFactorCodeDto) {
     await this.twoFactor.enable(user.userId, dto.code);
+    this.notify.twoFactorEnabled(user.email);
     return { ok: true };
   }
 
@@ -58,6 +63,7 @@ export class TwoFactorController {
   @ApiResponse({ status: 200, example: { code: 0, message: 'ok', data: { ok: true } } })
   async disable(@CurrentUser() user: CurrentUserPayload, @Body() dto: TwoFactorCodeDto) {
     await this.twoFactor.disable(user.userId, dto.code);
+    this.notify.twoFactorDisabled(user.email);
     return { ok: true };
   }
 }

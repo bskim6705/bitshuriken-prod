@@ -5,6 +5,8 @@ export interface CurrentUserPayload {
   userId: string;
   email: string;
   role: UserRole;
+  // JWT sid 클레임. 세션 인증 경로에서만 채워짐 (API 키 인증 경로는 undefined).
+  sessionId?: string;
 }
 
 /**

@@ -1,5 +1,5 @@
-import { IsString, IsNotEmpty, MinLength } from 'class-validator';
-import { ApiProperty } from '@nestjs/swagger';
+import { IsString, IsNotEmpty, IsOptional, MinLength } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class ChangePasswordDto {
   @ApiProperty({ example: 'currentPassword123' })
@@ -11,4 +11,12 @@ export class ChangePasswordDto {
   @IsString()
   @MinLength(8)
   newPassword: string;
+
+  @ApiPropertyOptional({
+    example: '123456',
+    description: '6-digit TOTP code (required if 2FA enabled)',
+  })
+  @IsOptional()
+  @IsString()
+  totpCode?: string;
 }

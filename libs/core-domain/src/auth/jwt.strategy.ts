@@ -1,12 +1,23 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { UserRole } from '@prisma/client';
 import { AuthSessionService } from './auth-session.service';
+import { SessionService } from './session.service';
+
+interface JwtPayload {
+  sub: string;
+  email: string;
+  role?: UserRole;
+  sid?: string;
+}
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
-  constructor(session: AuthSessionService) {
+  constructor(
+    session: AuthSessionService,
+    private sessions: SessionService,
+  ) {
     const secret = process.env.JWT_SECRET;
     if (!secret) throw new Error('JWT_SECRET is required');
 
@@ -19,8 +30,16 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  // 기존 세션 토큰(role 클레임 없음)은 USER로 폴백. 권한 판정은 AdminGuard의 DB 재조회가 담당.
-  validate(payload: { sub: string; email: string; role?: UserRole }) {
-    return { userId: payload.sub, email: payload.email, role: payload.role ?? UserRole.USER };
+  // sid 없는 토큰(구 형식)은 거부 → 재로그인 강제. 서버측 세션이 revoke됐으면 401.
+  async validate(payload: JwtPayload) {
+    if (!payload.sid || !(await this.sessions.isActive(payload.sid))) {
+      throw new UnauthorizedException();
+    }
+    return {
+      userId: payload.sub,
+      email: payload.email,
+      role: payload.role ?? UserRole.USER,
+      sessionId: payload.sid,
+    };
   }
 }

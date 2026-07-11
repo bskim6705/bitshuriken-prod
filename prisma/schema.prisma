@@ -52,6 +52,8 @@ model User {
   // null = 마스터/일반 계정. 설정 시 서브계정 — parentUserId가 소유 마스터.
   // 서브계정은 로그인 자격 없음(합성 email + 사용 불가 password), API 키로만 접근.
   parentUserId   String?
+  // 모든 발신 메일 상단에 표시되는 사용자 지정 코드. 피싱 메일 식별용. 2FA 게이트로만 설정.
+  antiPhishingCode String?
   createdAt      DateTime @default(now())
 
   parent      User?       @relation("Subaccounts", fields: [parentUserId], references: [id])
@@ -66,8 +68,42 @@ model User {
   fundingTxs  FundingTx[]
   authTokens  AuthToken[]
   balanceSnapshots BalanceSnapshot[]
+  sessions      Session[]
+  loginHistory  LoginHistory[]
 
   @@index([parentUserId])
+}
+
+// 서버측 세션 — logout-all / 세션 목록 / 즉시 무효화용. JWT의 sid 클레임이 이 행을 가리킨다.
+// 가드가 요청마다 active 확인(앱별 30s in-memory 캐시로 DB 부하 제한).
+model Session {
+  id         String    @id @default(uuid())
+  userId     String
+  ip         String
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime  @default(now())
+  expiresAt  DateTime // JWT exp 미러 (SESSION_TTL)
+  revokedAt  DateTime?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, revokedAt])
+}
+
+// 로그인 시도 이력 (성공/실패). 새 IP 감지 → 로그인 알림 메일.
+model LoginHistory {
+  id        String   @id @default(uuid())
+  userId    String
+  ip        String
+  userAgent String?
+  success   Boolean
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([userId, ip])
 }
 
 enum AuthTokenType {
@@ -115,7 +151,8 @@ model ApiKey {
   label           String? // 사용자 별칭
   canTrade    Boolean   @default(false)
   canRead     Boolean   @default(true)
-  ipWhitelist String[]  @default([]) // schema만, enforcement는 후속
+  ipWhitelist String[]  @default([]) // 빈 배열 = 무제한. verifySignature에서 req.ip 대조
+  expiresAt   DateTime? // null = 무기한. 서명 검증 시점에 만료 확인
   createdAt   DateTime  @default(now())
   lastUsedAt  DateTime?
   revokedAt   DateTime? // soft delete
@@ -236,6 +273,7 @@ model Order {
   @@unique([userId, tickerMarket, clientOrderId])
   @@index([userId, status])
   @@index([userId, tickerSymbol, tickerMarket, createdAt])
+  @@index([userId, tickerSymbol, tickerMarket, status]) // 심볼별 오픈주문 카운트 (MAX_NUM_ORDERS)
 }
 
 // OCO 주문 리스트. 잠금은 리스트 단위 1회(lockAssetSymbol/lockAmount) —

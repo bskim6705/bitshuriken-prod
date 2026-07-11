@@ -167,6 +167,8 @@ describe('Subaccount (e2e)', () => {
     await prisma.balanceSnapshot.deleteMany({ where: { userId: { in: allIds } } });
     await prisma.wallet.deleteMany({ where: { userId: { in: allIds } } });
     await prisma.authToken.deleteMany({ where: { userId: { in: allIds } } });
+    await prisma.session.deleteMany({ where: { userId: { in: allIds } } });
+    await prisma.loginHistory.deleteMany({ where: { userId: { in: allIds } } });
     await prisma.user.deleteMany({ where: { parentUserId: { in: masters } } });
     await prisma.user.deleteMany({ where: { id: { in: masters } } });
     await app.close();

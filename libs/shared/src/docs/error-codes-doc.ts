@@ -67,6 +67,8 @@ const MEANINGS: Partial<Record<keyof typeof ErrorCode, string>> = {
   EMAIL_ALREADY_VERIFIED: 'Email address is already verified.',
   INVALID_OR_EXPIRED_TOKEN: 'Verification/reset token is invalid or expired.',
   ADMIN_REQUIRED: 'Endpoint requires an admin account.',
+  API_KEY_EXPIRED: 'API key has passed its expiry date.',
+  API_KEY_IP_REJECTED: 'Request IP is not in the API key allowlist.',
 
   POSITION_NOT_FOUND: 'No position for the symbol.',
   POSITION_LIQUIDATING: 'Position is being liquidated; action rejected.',

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import * as nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
+import { PrismaService } from '@app/infra/prisma/prisma.service';
 
 /**
  * SMTP 메일 발송 (ADR-044). 설정은 env에서 — 부재 시 부팅 실패(loud).
@@ -13,7 +14,7 @@ export class MailService {
   private readonly from: string;
   private readonly appBaseUrl: string;
 
-  constructor() {
+  constructor(private prisma: PrismaService) {
     const host = process.env.SMTP_HOST;
     const portRaw = process.env.SMTP_PORT;
     const user = process.env.SMTP_USER;
@@ -60,8 +61,24 @@ export class MailService {
     );
   }
 
+  /** 보안 알림 등 자유 본문 메일 (링크 없음). 안티피싱 배너는 send()가 붙인다. */
+  async sendNotice(to: string, subject: string, text: string): Promise<void> {
+    await this.send(to, subject, text);
+  }
+
   private async send(to: string, subject: string, text: string): Promise<void> {
-    await this.transporter.sendMail({ from: this.from, to, subject, text });
+    const body = await this.withAntiPhishingBanner(to, text);
+    await this.transporter.sendMail({ from: this.from, to, subject, text: body });
     this.logger.log(`Sent "${subject}" to ${to}`);
+  }
+
+  /** 수신자가 안티피싱 코드를 설정했으면 본문 상단에 배너를 붙인다(모든 발신 메일 공통). */
+  private async withAntiPhishingBanner(to: string, text: string): Promise<string> {
+    const user = await this.prisma.user
+      .findUnique({ where: { email: to }, select: { antiPhishingCode: true } })
+      .catch(() => null);
+    const code = user?.antiPhishingCode;
+    if (!code) return text;
+    return `[Anti-phishing code: ${code}]\n\n${text}`;
   }
 }

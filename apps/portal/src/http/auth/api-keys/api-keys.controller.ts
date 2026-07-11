@@ -12,6 +12,7 @@ import type { CurrentUserPayload } from '@app/shared/decorators/current-user.dec
 import { ApiKeyService } from '@app/core-domain/api-key/api-key.service';
 import { JwtOnlyGuard } from '@app/core-domain/auth/guards/jwt-only.guard';
 import { CreateApiKeyDto } from './dto/create-api-key.dto';
+import { SecurityNotifyService } from '../../../notify/security-notify.service';
 
 /**
  * API key 관리. JWT 전용 — API key로 새 API key를 발급하는 escalation 차단.
@@ -22,7 +23,10 @@ import { CreateApiKeyDto } from './dto/create-api-key.dto';
 @UseGuards(JwtOnlyGuard)
 @Controller('auth/api-keys')
 export class ApiKeysController {
-  constructor(private readonly apiKeyService: ApiKeyService) {}
+  constructor(
+    private readonly apiKeyService: ApiKeyService,
+    private readonly notify: SecurityNotifyService,
+  ) {}
 
   @Post()
   @ApiOperation({ summary: 'Issue a new API key (plaintext secret returned once)' })
@@ -43,8 +47,10 @@ export class ApiKeysController {
       },
     },
   })
-  issue(@CurrentUser() user: CurrentUserPayload, @Body() dto: CreateApiKeyDto) {
-    return this.apiKeyService.issue(user.userId, dto);
+  async issue(@CurrentUser() user: CurrentUserPayload, @Body() dto: CreateApiKeyDto) {
+    const issued = await this.apiKeyService.issue(user.userId, dto);
+    this.notify.apiKeyCreated(user.email, issued.label);
+    return issued;
   }
 
   @Get()

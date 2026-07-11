@@ -37,8 +37,10 @@ describe('Auth (e2e)', () => {
   });
 
   afterAll(async () => {
-    // delete child rows first (AuthToken FK -> User) before removing the user
+    // delete child rows first (FK -> User) before removing the user
     await prisma.authToken.deleteMany({ where: { user: { email: testEmail } } });
+    await prisma.session.deleteMany({ where: { user: { email: testEmail } } });
+    await prisma.loginHistory.deleteMany({ where: { user: { email: testEmail } } });
     await prisma.user.deleteMany({ where: { email: testEmail } });
     await app.close();
   });

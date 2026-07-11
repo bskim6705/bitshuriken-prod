@@ -18,6 +18,8 @@ export interface IssuedApiKey {
   label: string | null;
   canTrade: boolean;
   canRead: boolean;
+  ipWhitelist: string[];
+  expiresAt: Date | null;
   createdAt: Date;
 }
 
@@ -35,12 +37,23 @@ export class ApiKeyService {
    */
   async issue(
     userId: string,
-    params: { label?: string; canTrade?: boolean; canRead?: boolean; totpCode?: string },
+    params: {
+      label?: string;
+      canTrade?: boolean;
+      canRead?: boolean;
+      ipWhitelist?: string[];
+      expiresInDays?: number;
+      totpCode?: string;
+    },
   ): Promise<IssuedApiKey> {
     await this.twoFactor.assertSatisfied(userId, params.totpCode);
 
     const apiKey = crypto.randomBytes(API_KEY_BYTES).toString('base64url');
     const secret = crypto.randomBytes(API_SECRET_BYTES).toString('base64url');
+    const expiresAt =
+      params.expiresInDays !== undefined
+        ? new Date(Date.now() + params.expiresInDays * 24 * 60 * 60 * 1000)
+        : null;
 
     const created = await this.prisma.apiKey.create({
       data: {
@@ -50,6 +63,8 @@ export class ApiKeyService {
         label: params.label ?? null,
         canTrade: params.canTrade ?? false,
         canRead: params.canRead ?? true,
+        ipWhitelist: params.ipWhitelist ?? [],
+        expiresAt,
       },
     });
 
@@ -60,6 +75,8 @@ export class ApiKeyService {
       label: created.label,
       canTrade: created.canTrade,
       canRead: created.canRead,
+      ipWhitelist: created.ipWhitelist,
+      expiresAt: created.expiresAt,
       createdAt: created.createdAt,
     };
   }
@@ -78,6 +95,7 @@ export class ApiKeyService {
         canTrade: true,
         canRead: true,
         ipWhitelist: true,
+        expiresAt: true,
         createdAt: true,
         lastUsedAt: true,
       },
@@ -114,6 +132,7 @@ export class ApiKeyService {
     queryString: string;
     body: string;
     providedSignature: string;
+    ip?: string;
   }): Promise<ApiKey> {
     const record = await this.prisma.apiKey.findUnique({
       where: { apiKey: params.apiKey },
@@ -122,6 +141,15 @@ export class ApiKeyService {
       throw new DomainException(
         ErrorCode.INVALID_API_KEY,
         'Invalid API key',
+        HttpStatus.UNAUTHORIZED,
+      );
+    }
+
+    // 만료 확인 — HMAC 계산 전(값싼 게이트).
+    if (record.expiresAt && record.expiresAt.getTime() <= Date.now()) {
+      throw new DomainException(
+        ErrorCode.API_KEY_EXPIRED,
+        'API key has expired',
         HttpStatus.UNAUTHORIZED,
       );
     }
@@ -151,6 +179,15 @@ export class ApiKeyService {
       throw new DomainException(
         ErrorCode.INVALID_SIGNATURE,
         'Invalid signature',
+        HttpStatus.UNAUTHORIZED,
+      );
+    }
+
+    // IP allowlist — 서명 검증 후(빈 배열 = 무제한). 정당한 키 소유자에게만 IP 제약을 노출.
+    if (record.ipWhitelist.length > 0 && (!params.ip || !record.ipWhitelist.includes(params.ip))) {
+      throw new DomainException(
+        ErrorCode.API_KEY_IP_REJECTED,
+        'Request IP is not allowed for this API key',
         HttpStatus.UNAUTHORIZED,
       );
     }

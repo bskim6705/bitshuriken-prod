@@ -10,9 +10,12 @@ import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
 import { MailService } from '../mail/mail.service';
 import { TwoFactorService } from '../two-factor/two-factor.service';
+import { SessionService } from './session.service';
 
 const EMAIL_VERIFY_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1h
+const ANTI_PHISHING_MAX = 32;
+const LOGIN_HISTORY_MAX = 100;
 
 export interface UserProfile {
   id: string;
@@ -20,6 +23,7 @@ export interface UserProfile {
   displayName: string | null;
   emailVerified: boolean;
   twoFactorEnabled: boolean;
+  antiPhishingCode: string | null;
   role: UserRole;
   createdAt: Date;
 }
@@ -30,8 +34,15 @@ interface UserRecord {
   displayName: string | null;
   emailVerified: boolean;
   twoFactorEnabled: boolean;
+  antiPhishingCode: string | null;
   role: UserRole;
   createdAt: Date;
+}
+
+/** 로그인/가입 요청의 원천 정보 — 세션 행 + 로그인 이력에 기록. */
+export interface LoginContext {
+  ip: string;
+  userAgent: string | null;
 }
 
 const DISPLAY_NAME_MAX = 24;
@@ -45,9 +56,10 @@ export class AuthService {
     private jwt: JwtService,
     private mail: MailService,
     private twoFactor: TwoFactorService,
+    private sessions: SessionService,
   ) {}
 
-  async signup(dto: SignupDto) {
+  async signup(dto: SignupDto, ctx: LoginContext) {
     const exists = await this.prisma.user.findUnique({ where: { email: dto.email } });
     if (exists)
       throw new DomainException(
@@ -66,11 +78,15 @@ export class AuthService {
       this.logger.warn(`verification email failed for user ${user.id}: ${String(e)}`),
     );
 
-    return this.issueSession(user);
+    // 가입 IP를 known 집합에 시드 → 이후 다른 IP 첫 로그인이 알림을 낸다.
+    await this.recordLogin(user.id, ctx, true);
+    const session = await this.issueSession(user, ctx);
+    return { ...session, newIp: false };
   }
 
-  async login(dto: LoginDto) {
+  async login(dto: LoginDto, ctx: LoginContext) {
     const user = await this.prisma.user.findUnique({ where: { email: dto.email } });
+    // 미존재 email은 이력 기록 없음(붙일 대상 없음) — 열거 방지 위해 응답은 동일.
     if (!user)
       throw new DomainException(
         ErrorCode.INVALID_CREDENTIALS,
@@ -79,25 +95,48 @@ export class AuthService {
       );
 
     const valid = await bcrypt.compare(dto.password, user.hashedPassword);
-    if (!valid)
+    if (!valid) {
+      await this.recordLogin(user.id, ctx, false);
       throw new DomainException(
         ErrorCode.INVALID_CREDENTIALS,
         'Invalid credentials',
         HttpStatus.UNAUTHORIZED,
       );
+    }
 
     // 2FA 사용자는 TOTP 코드 필수 (미사용자는 no-op → 기존 흐름 불변)
-    this.twoFactor.assertForUser(user, dto.totpCode);
+    try {
+      this.twoFactor.assertForUser(user, dto.totpCode);
+    } catch (e) {
+      await this.recordLogin(user.id, ctx, false);
+      throw e;
+    }
 
     // 계정 정지 — 자격 확인 후 차단 (잘못된 비번엔 상태 비노출)
-    if (!user.loginEnabled)
+    if (!user.loginEnabled) {
+      await this.recordLogin(user.id, ctx, false);
       throw new DomainException(
         ErrorCode.ACCOUNT_LOGIN_DISABLED,
         'Sign-in is disabled for this account',
         HttpStatus.FORBIDDEN,
       );
+    }
 
-    return this.issueSession(user);
+    const newIp = await this.isNewIp(user.id, ctx.ip);
+    await this.recordLogin(user.id, ctx, true);
+    await this.cleanupExpiredSessions(user.id);
+    const session = await this.issueSession(user, ctx);
+    return { ...session, newIp };
+  }
+
+  async logout(rawToken: string | null | undefined): Promise<void> {
+    if (!rawToken) return;
+    try {
+      const payload = this.jwt.verify<{ sub?: string; sid?: string }>(rawToken);
+      if (payload.sub && payload.sid) await this.sessions.revoke(payload.sub, payload.sid);
+    } catch {
+      // 만료/위조 토큰 — 조용히 무시(로그아웃은 항상 성공 semantics)
+    }
   }
 
   async getProfile(userId: string): Promise<UserProfile> {
@@ -111,7 +150,17 @@ export class AuthService {
     return this.toProfile(user);
   }
 
-  async changePassword(userId: string, oldPassword: string, newPassword: string): Promise<void> {
+  /**
+   * 비밀번호 변경. 2FA 사용자는 TOTP 필수. 성공 시 현재 세션만 남기고 나머지 revoke.
+   * 이메일 발송은 호출부(컨트롤러) 책임.
+   */
+  async changePassword(
+    userId: string,
+    oldPassword: string,
+    newPassword: string,
+    totpCode: string | undefined,
+    currentSessionId: string | undefined,
+  ): Promise<{ email: string }> {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user)
       throw new DomainException(ErrorCode.USER_NOT_FOUND, 'User not found', HttpStatus.NOT_FOUND);
@@ -122,9 +171,59 @@ export class AuthService {
         'Current password is incorrect',
         HttpStatus.UNAUTHORIZED,
       );
+    this.twoFactor.assertForUser(user, totpCode);
     await this.prisma.user.update({
       where: { id: userId },
       data: { hashedPassword: await bcrypt.hash(newPassword, 10) },
+    });
+    // 비번 변경 후 타 세션 무효화 — 비번이 이미 바뀌었으니 revoke 실패로 요청을 깨지 않는다.
+    if (currentSessionId) {
+      await this.sessions
+        .revokeAllExcept(userId, currentSessionId)
+        .catch((e: unknown) => this.logger.warn(`session revoke failed after pw change: ${String(e)}`));
+    }
+    return { email: user.email };
+  }
+
+  /** 안티피싱 코드 설정/해제 — 2FA 게이트. 빈 문자열이면 해제. */
+  async setAntiPhishingCode(
+    userId: string,
+    raw: string | null,
+    totpCode: string | undefined,
+  ): Promise<UserProfile> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user)
+      throw new DomainException(ErrorCode.USER_NOT_FOUND, 'User not found', HttpStatus.NOT_FOUND);
+    this.twoFactor.assertForUser(user, totpCode);
+
+    const trimmed = raw?.trim() ?? '';
+    const code: string | null = trimmed.length === 0 ? null : trimmed;
+    if (code !== null) {
+      if (code.length > ANTI_PHISHING_MAX)
+        throw new DomainException(
+          ErrorCode.INVALID_PARAMETER,
+          `Anti-phishing code must be at most ${ANTI_PHISHING_MAX} characters`,
+        );
+      if (!/^[\w .!?@#-]+$/.test(code))
+        throw new DomainException(
+          ErrorCode.INVALID_PARAMETER,
+          'Anti-phishing code contains unsupported characters',
+        );
+    }
+    const updated = await this.prisma.user.update({
+      where: { id: userId },
+      data: { antiPhishingCode: code },
+    });
+    return this.toProfile(updated);
+  }
+
+  async getLoginHistory(userId: string, limit = LOGIN_HISTORY_MAX) {
+    const take = Math.min(Math.max(limit, 1), LOGIN_HISTORY_MAX);
+    return this.prisma.loginHistory.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take,
+      select: { id: true, ip: true, userAgent: true, success: true, createdAt: true },
     });
   }
 
@@ -188,12 +287,18 @@ export class AuthService {
       .catch((e: unknown) => this.logger.warn(`password reset email failed: ${String(e)}`));
   }
 
-  async resetPassword(rawToken: string, newPassword: string): Promise<void> {
+  /** 토큰 기반 비번 재설정. 전 세션 revoke(탈취 대응). 이메일 발송은 호출부 책임. */
+  async resetPassword(rawToken: string, newPassword: string): Promise<{ email: string }> {
     const userId = await this.consumeToken(rawToken, AuthTokenType.PASSWORD_RESET);
-    await this.prisma.user.update({
+    const user = await this.prisma.user.update({
       where: { id: userId },
       data: { hashedPassword: await bcrypt.hash(newPassword, 10) },
+      select: { email: true },
     });
+    await this.sessions
+      .revokeAll(userId)
+      .catch((e: unknown) => this.logger.warn(`session revoke failed after pw reset: ${String(e)}`));
+    return { email: user.email };
   }
 
   // ---- helpers ----
@@ -243,9 +348,43 @@ export class AuthService {
     return token.userId;
   }
 
-  private issueSession(user: UserRecord) {
-    const accessToken = this.jwt.sign({ sub: user.id, email: user.email, role: user.role });
+  private async issueSession(user: UserRecord, ctx: LoginContext) {
+    const sid = await this.sessions.create(user.id, ctx.ip, ctx.userAgent);
+    const accessToken = this.jwt.sign({
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      sid,
+    });
     return { accessToken, user: this.toProfile(user) };
+  }
+
+  /** 로그인 시도 기록 — best-effort(기록 실패가 인증 흐름을 깨지 않게). */
+  private async recordLogin(userId: string, ctx: LoginContext, success: boolean): Promise<void> {
+    await this.prisma.loginHistory
+      .create({ data: { userId, ip: ctx.ip, userAgent: ctx.userAgent, success } })
+      .catch((e: unknown) => this.logger.warn(`login history write failed: ${String(e)}`));
+  }
+
+  /** 이 IP에서 성공 로그인 이력이 없고, 다른 IP 성공 이력은 있으면 true(=새 IP 알림 대상). 첫 로그인은 known. */
+  private async isNewIp(userId: string, ip: string): Promise<boolean> {
+    const sameIp = await this.prisma.loginHistory.findFirst({
+      where: { userId, ip, success: true },
+      select: { id: true },
+    });
+    if (sameIp) return false;
+    const anyPrior = await this.prisma.loginHistory.findFirst({
+      where: { userId, success: true },
+      select: { id: true },
+    });
+    return anyPrior !== null;
+  }
+
+  /** 만료 세션 lazy 정리 — 로그인 시점에 한 번(cron 미도입). best-effort. */
+  private async cleanupExpiredSessions(userId: string): Promise<void> {
+    await this.prisma.session
+      .deleteMany({ where: { userId, expiresAt: { lt: new Date() } } })
+      .catch(() => undefined);
   }
 
   private toProfile(user: UserRecord): UserProfile {
@@ -255,6 +394,7 @@ export class AuthService {
       displayName: user.displayName,
       emailVerified: user.emailVerified,
       twoFactorEnabled: user.twoFactorEnabled,
+      antiPhishingCode: user.antiPhishingCode,
       role: user.role,
       createdAt: user.createdAt,
     };
