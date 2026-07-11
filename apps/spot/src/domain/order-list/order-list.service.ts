@@ -15,6 +15,9 @@ import { OcoStateMachine, TERMINAL_STATUSES, decideLegTerminal } from './oco-sta
 import { LegFinalValues, resolveFinalization } from './oco-refund';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
+import { MAX_OPEN_ORDERS_PER_SYMBOL } from '@app/shared/constants/trading-protection';
+
+const OPEN_STATUSES: OrderStatus[] = ['NEW', 'OPEN', 'PARTIAL'];
 
 const ZERO = new Decimal(0);
 const MAX_LIST_QUERY_LIMIT = 500;
@@ -60,6 +63,22 @@ export class OrderListService {
     // 계정 거래 정지 게이트
     await this.users.assertCanTrade(userId);
 
+    // 오픈주문 상한 — OCO는 2건(limit + stop)을 차지.
+    const openCount = await this.prisma.order.count({
+      where: {
+        userId,
+        tickerSymbol: dto.tickerSymbol,
+        tickerMarket: dto.tickerMarket,
+        status: { in: OPEN_STATUSES },
+      },
+    });
+    if (openCount + 2 > MAX_OPEN_ORDERS_PER_SYMBOL) {
+      throw new DomainException(
+        ErrorCode.MAX_NUM_ORDERS_EXCEEDED,
+        `Open-order limit reached for ${dto.tickerSymbol} (max ${MAX_OPEN_ORDERS_PER_SYMBOL})`,
+      );
+    }
+
     const qty = new Decimal(dto.qty);
     const price = new Decimal(dto.price);
     const stopPrice = new Decimal(dto.stopPrice);
@@ -88,7 +107,11 @@ export class OrderListService {
       }
     }
 
-    // 양 레그 모두 tick/step/minNotional 검증
+    // 가격 밴드 기준가 = 5m 가중평균(있으면), 없으면 last(위에서 non-null 보장).
+    const avg = this.tickerStats.avgPrice5m(dto.tickerMarket, dto.tickerSymbol);
+    const bandRefPrice = avg !== null ? new Decimal(avg) : last;
+
+    // 양 레그 모두 tick/step/minNotional + 가격 밴드 검증
     validateAgainstMeta({
       type: 'LIMIT',
       side: dto.side,
@@ -98,6 +121,7 @@ export class OrderListService {
       origQuoteQty: null,
       meta,
       lastPrice: last,
+      bandRefPrice,
     });
     validateAgainstMeta({
       type: 'STOP_LOSS_LIMIT',
@@ -108,6 +132,7 @@ export class OrderListService {
       origQuoteQty: null,
       meta,
       lastPrice: last,
+      bandRefPrice,
     });
 
     // 리스트 단위 잠금 1회: SELL은 base qty, BUY는 quote max(price, stopLimitPrice)*qty

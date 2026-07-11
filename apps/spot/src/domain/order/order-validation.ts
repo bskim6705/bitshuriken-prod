@@ -4,6 +4,10 @@ import { TickerMeta } from '@app/core-domain/ticker/ticker-stats.service';
 import { isLimitLike } from '@app/shared/order-classify';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
+import { SPOT_PRICE_BAND_PCT } from '@app/shared/constants/trading-protection';
+
+const BAND_PCT = new Decimal(SPOT_PRICE_BAND_PCT);
+const ONE = new Decimal(1);
 
 // raw 입력 필드 조합 (CreateOrderDto 구조 부분집합 — 순수 모듈이라 DTO 클래스 비의존)
 export interface OrderFieldsInput {
@@ -25,6 +29,8 @@ export interface MetaValidationInput {
   meta: TickerMeta;
   // minNotional 추정용 (market-like SELL). null이면 해당 검사 생략.
   lastPrice: Decimal | null;
+  // 가격 밴드 기준가 (5m 가중평균 or last). null이면(신규 상장 등) 밴드 검사 생략.
+  bandRefPrice: Decimal | null;
 }
 
 /** 타입별 필수/금지 필드 매트릭스. */
@@ -134,6 +140,17 @@ export function validateAgainstMeta(input: MetaValidationInput): void {
         ErrorCode.INVALID_PRICE,
         `price must have at most ${meta.pricePrecision} decimals`,
       );
+    }
+    // PERCENT_PRICE 밴드 — limit 호가만(stopPrice·MARKET 제외). 기준가 없으면 생략.
+    if (input.bandRefPrice !== null) {
+      const lo = input.bandRefPrice.mul(ONE.sub(BAND_PCT));
+      const hi = input.bandRefPrice.mul(ONE.add(BAND_PCT));
+      if (input.price.lt(lo) || input.price.gt(hi)) {
+        throw new DomainException(
+          ErrorCode.PRICE_OUT_OF_BAND,
+          `price must be within ±${BAND_PCT.mul(100).toFixed(0)}% of ${input.bandRefPrice.toFixed(meta.pricePrecision)}`,
+        );
+      }
     }
   }
   if (input.stopPrice !== null) {

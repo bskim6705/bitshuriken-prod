@@ -17,6 +17,7 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
 import { createOrderOrThrowDuplicate, generateClientOrderId } from '@app/shared/order-client-id';
+import { MAX_OPEN_ORDERS_PER_SYMBOL } from '@app/shared/constants/trading-protection';
 
 const OPEN_STATUSES: OrderStatus[] = ['NEW', 'OPEN', 'PARTIAL'];
 const TERMINAL_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
@@ -205,6 +206,18 @@ export class OrderService {
       }
     }
 
+    // 심볼별 오픈주문 상한 (soft — 동시 placement 레이스는 허용). replace는 교체 대상 제외.
+    await this.assertUnderOrderCap(
+      userId,
+      dto.tickerMarket,
+      dto.tickerSymbol,
+      dto.replacesOrderId,
+    );
+
+    // 가격 밴드 기준가 = 5m 가중평균(있으면), 없으면 last. 둘 다 없으면 밴드 검사 생략.
+    const avg = this.tickerStats.avgPrice5m(dto.tickerMarket, dto.tickerSymbol);
+    const bandRefPrice = avg !== null ? new Decimal(avg) : last;
+
     validateAgainstMeta({
       type: dto.type,
       side: dto.side,
@@ -214,6 +227,7 @@ export class OrderService {
       origQuoteQty,
       meta,
       lastPrice: last,
+      bandRefPrice,
     });
 
     const lock = lockFor({ type: dto.type, side: dto.side, price, origQty, origQuoteQty, meta });
@@ -383,6 +397,30 @@ export class OrderService {
   }
 
   // ---------- helpers ----------
+
+  /** 오픈주문 상한 검사. excludeOrderId(cancel-replace 대상)는 카운트에서 제외. */
+  private async assertUnderOrderCap(
+    userId: string,
+    market: MarketType,
+    symbol: string,
+    excludeOrderId?: string,
+  ): Promise<void> {
+    const count = await this.prisma.order.count({
+      where: {
+        userId,
+        tickerSymbol: symbol,
+        tickerMarket: market,
+        status: { in: OPEN_STATUSES },
+        ...(excludeOrderId ? { id: { not: excludeOrderId } } : {}),
+      },
+    });
+    if (count >= MAX_OPEN_ORDERS_PER_SYMBOL) {
+      throw new DomainException(
+        ErrorCode.MAX_NUM_ORDERS_EXCEEDED,
+        `Open-order limit reached for ${symbol} (max ${MAX_OPEN_ORDERS_PER_SYMBOL})`,
+      );
+    }
+  }
 
   private async lastPriceOf(market: MarketType, symbol: string): Promise<Decimal | null> {
     const snap = this.tickerStats.snapshotOne(market, symbol);

@@ -193,6 +193,12 @@ class FakePrisma {
     },
     updateMany: (args: { where: Row; data: Row }) =>
       Promise.resolve(updateMany(this.orders.values() as Iterable<Row>, args.where, args.data)),
+    count: (args: { where: Row }) => {
+      const n = [...this.orders.values()].filter((o) =>
+        matchesWhere(o as unknown as Row, args.where),
+      ).length;
+      return Promise.resolve(n);
+    },
   };
 
   wallet = {
@@ -330,6 +336,7 @@ function makeService(db: FakePrisma, opts: { lastPrice?: string | null } = {}) {
   const tickerStats = {
     metaOf: jest.fn().mockReturnValue(META),
     snapshotOne: jest.fn().mockReturnValue(lastPrice === null ? null : { lastPrice }),
+    avgPrice5m: jest.fn().mockReturnValue(lastPrice), // 밴드 기준가 = last(테스트 단순화)
     assertTradable: jest.fn().mockResolvedValue(undefined),
   };
   const userStream = {

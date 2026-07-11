@@ -38,6 +38,7 @@ const MEANINGS: Partial<Record<keyof typeof ErrorCode, string>> = {
   REDUCE_ONLY_REJECTED: 'reduceOnly order rejected (no opposing position).',
   REDUCE_ONLY_EXCEEDED: 'reduceOnly qty exceeds the open position size.',
   ORDER_DUPLICATE_CLIENT_ID: 'clientOrderId is already in use for this product.',
+  MAX_NUM_ORDERS_EXCEEDED: 'Open-order count for this symbol exceeds the per-user maximum.',
 
   ORDER_LIST_NOT_FOUND: 'No order list matches the id.',
   ORDER_LIST_NOT_CANCELABLE: 'Order list is not in a cancelable state.',

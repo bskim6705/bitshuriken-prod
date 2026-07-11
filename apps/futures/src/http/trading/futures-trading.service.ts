@@ -41,6 +41,7 @@ import { isStopType } from '@app/shared/order-classify';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
 import { createOrderOrThrowDuplicate, generateClientOrderId } from '@app/shared/order-client-id';
+import { MAX_OPEN_ORDERS_PER_SYMBOL } from '@app/shared/constants/trading-protection';
 
 const MARKET = MarketType.FUTURES;
 const OPEN_STATUSES: OrderStatus[] = [OrderStatus.NEW, OrderStatus.OPEN, OrderStatus.PARTIAL];
@@ -87,6 +88,24 @@ export class FuturesTradingService {
     // 계정 거래 정지 게이트
     await this.users.assertCanTrade(userId);
     const config = await this.futuresConfig.configOf(dto.symbol);
+
+    // 심볼별 오픈주문 상한 (청산 주문 제외 — 청산은 이 경로 미경유이나 방어적으로 필터).
+    // stop/일반 분기 이전에 검사 → 두 경로 모두 커버.
+    const openCount = await this.prisma.order.count({
+      where: {
+        userId,
+        tickerSymbol: dto.symbol,
+        tickerMarket: MARKET,
+        status: { in: OPEN_STATUSES },
+        liquidation: false,
+      },
+    });
+    if (openCount >= MAX_OPEN_ORDERS_PER_SYMBOL) {
+      throw new DomainException(
+        ErrorCode.MAX_NUM_ORDERS_EXCEEDED,
+        `Open-order limit reached for ${dto.symbol} (max ${MAX_OPEN_ORDERS_PER_SYMBOL})`,
+      );
+    }
 
     const { price, stopPrice, qty, timeInForce } = normalizeOrderFields(dto, meta);
     const clientOrderId = dto.newClientOrderId ?? generateClientOrderId();

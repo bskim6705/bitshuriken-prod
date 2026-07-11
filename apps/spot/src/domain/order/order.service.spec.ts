@@ -148,6 +148,12 @@ class FakePrisma {
     },
     updateMany: (args: { where: Row; data: Row }) =>
       Promise.resolve(updateMany(this.orders.values() as Iterable<Row>, args.where, args.data)),
+    count: (args: { where: Row }) => {
+      const n = [...this.orders.values()].filter((o) =>
+        matchesWhere(o as unknown as Row, args.where),
+      ).length;
+      return Promise.resolve(n);
+    },
   };
 
   wallet = {
@@ -226,6 +232,7 @@ function makeService(db: FakePrisma, opts: { lastPrice?: string | null } = {}) {
   const tickerStats = {
     metaOf: jest.fn().mockReturnValue(META),
     snapshotOne: jest.fn().mockReturnValue(lastPrice === null ? null : { lastPrice }),
+    avgPrice5m: jest.fn().mockReturnValue(lastPrice), // 밴드 기준가 = last(테스트 단순화)
     assertTradable: jest.fn().mockResolvedValue(undefined),
   };
   const userStream = {
@@ -449,9 +456,103 @@ describe('OrderService (박제)', () => {
     const h = makeService(db);
 
     await expect(
-      h.service.submitNewOrder(USER, dto({ price: '50', origQty: '0.1' })), // notional 5 < 10
+      // 밴드 안(50000) + notional 5 < 10 → minNotional로 거부 (밴드 아님)
+      h.service.submitNewOrder(USER, dto({ price: '50000', origQty: '0.0001' })),
     ).rejects.toMatchObject({ code: ErrorCode.MIN_NOTIONAL_NOT_MET });
     expect(wallet(db, 'USDT').locked.toFixed()).toBe('0');
+  });
+
+  // ---------- price band (PERCENT_PRICE ±10%) ----------
+
+  it('밴드 초과 지정가 거부: PRICE_OUT_OF_BAND, 잠금 없음 (ref 50000, +10% 초과)', async () => {
+    const db = new FakePrisma();
+    db.seedWallet(USER, 'USDT', 1_000_000);
+    const h = makeService(db); // ref = 50000
+
+    await expect(
+      h.service.submitNewOrder(USER, dto({ price: '55001', origQty: '0.1' })), // +10.002%
+    ).rejects.toMatchObject({ code: ErrorCode.PRICE_OUT_OF_BAND });
+    expect(wallet(db, 'USDT').locked.toFixed()).toBe('0');
+  });
+
+  it('밴드 하한 초과 거부: PRICE_OUT_OF_BAND (ref 50000, -10% 미만)', async () => {
+    const db = new FakePrisma();
+    db.seedWallet(USER, 'BTC', 1);
+    const h = makeService(db);
+
+    await expect(
+      h.service.submitNewOrder(USER, dto({ side: OrderSide.SELL, price: '44999', origQty: '0.1' })),
+    ).rejects.toMatchObject({ code: ErrorCode.PRICE_OUT_OF_BAND });
+  });
+
+  it('밴드 경계(정확히 ±10%)는 통과 — gte/lte inclusive', async () => {
+    const db = new FakePrisma();
+    db.seedWallet(USER, 'USDT', 1_000_000);
+    const h = makeService(db);
+    // 55000 = 50000 × 1.10 정확히 경계
+    const order = (await h.service.submitNewOrder(
+      USER,
+      dto({ price: '55000', origQty: '0.1' }),
+    )) as Order;
+    expect(order.status).toBe('NEW');
+  });
+
+  it('기준가 없으면(avgPrice5m null + last null) 밴드 검사 생략', async () => {
+    const db = new FakePrisma();
+    db.seedWallet(USER, 'USDT', 1_000_000);
+    const h = makeService(db, { lastPrice: null }); // avgPrice5m mock도 null 반환
+    const order = (await h.service.submitNewOrder(
+      USER,
+      dto({ price: '999999', origQty: '0.1' }),
+    )) as Order;
+    expect(order.status).toBe('NEW');
+  });
+
+  // ---------- MAX_NUM_ORDERS (per-symbol open-order cap) ----------
+
+  it('심볼 오픈주문 상한 도달 시 신규 주문 거부: MAX_NUM_ORDERS_EXCEEDED', async () => {
+    const db = new FakePrisma();
+    db.seedWallet(USER, 'USDT', 100_000_000);
+    // 상한(200)만큼 오픈 주문 시드
+    for (let i = 0; i < 200; i++) {
+      db.makeOrder({ userId: USER, price: d(50000), origQty: d('0.1'), status: 'OPEN' });
+    }
+    const h = makeService(db);
+
+    await expect(
+      h.service.submitNewOrder(USER, dto({ price: '50000', origQty: '0.1' })),
+    ).rejects.toMatchObject({ code: ErrorCode.MAX_NUM_ORDERS_EXCEEDED });
+    expect(wallet(db, 'USDT').locked.toFixed()).toBe('0');
+  });
+
+  it('상한 미만(199)에서는 통과', async () => {
+    const db = new FakePrisma();
+    db.seedWallet(USER, 'USDT', 100_000_000);
+    for (let i = 0; i < 199; i++) {
+      db.makeOrder({ userId: USER, price: d(50000), origQty: d('0.1'), status: 'OPEN' });
+    }
+    const h = makeService(db);
+    const order = (await h.service.submitNewOrder(
+      USER,
+      dto({ price: '50000', origQty: '0.1' }),
+    )) as Order;
+    expect(order.status).toBe('NEW');
+  });
+
+  it('cancel-replace는 교체 대상을 카운트에서 제외 — 상한에서도 성공', async () => {
+    const db = new FakePrisma();
+    db.seedWallet(USER, 'USDT', 100_000_000);
+    let old!: OrderRow;
+    for (let i = 0; i < 200; i++) {
+      const o = db.makeOrder({ userId: USER, price: d(50000), origQty: d('0.1'), status: 'OPEN' });
+      if (i === 0) old = o;
+    }
+    const h = makeService(db);
+    const res = await h.service.submitNewOrder(
+      USER,
+      dto({ price: '50000', origQty: '0.1', replacesOrderId: old.id }),
+    );
+    expect((res as { order: Order }).order.status).toBe('NEW');
   });
 
   it('즉시 트리거 충족 stop 거부: ORDER_WOULD_TRIGGER_IMMEDIATELY (SL SELL lte / TP BUY lte 경계 포함)', async () => {
