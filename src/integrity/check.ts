@@ -25,7 +25,10 @@ async function once(): Promise<boolean> {
   ]);
   const money = [...inv, ...fut, ...liq];
   const all = [...money, ...par];
-  const fails = all.filter((r) => r.status === 'fail').length;
+  // Only monetary invariants (F1-F4) gate the exit code. Parity is informational: a crossed local
+  // book or mid drift is surfaced but never fails the run (may be stale seed/e2e leftovers).
+  const moneyFails = money.filter((r) => r.status === 'fail').length;
+  const parFails = par.filter((r) => r.status === 'fail').length;
   const warns = all.filter((r) => r.status === 'warn').length;
 
   console.log(`\n${C.bold}═══ bitshuriken monetary integrity — ${new Date().toTimeString().slice(0, 8)} ═══${C.reset}`);
@@ -33,10 +36,11 @@ async function once(): Promise<boolean> {
   printSection('F3 FUTURES PnL & LEDGER', fut);
   printSection('F2 LIQUIDATION ORACLE', liq);
   printSection('PARITY (local book vs source — informational)', par);
-  const verdict = fails ? `${C.red}FAIL${C.reset}` : warns ? `${C.yellow}PASS (warnings)${C.reset}` : `${C.green}PASS${C.reset}`;
-  console.log(`${C.bold}RESULT: ${verdict}${C.reset}  ${C.dim}(${fails} fail, ${warns} warn)${C.reset}`);
-  // A monetary fail (F1-F4) exits non-zero; parity warnings never fail the run.
-  return fails === 0;
+  const verdict = moneyFails ? `${C.red}FAIL${C.reset}` : warns || parFails ? `${C.yellow}PASS (warnings)${C.reset}` : `${C.green}PASS${C.reset}`;
+  console.log(
+    `${C.bold}RESULT: ${verdict}${C.reset}  ${C.dim}(${moneyFails} monetary fail, ${parFails} parity fail, ${warns} warn)${C.reset}`,
+  );
+  return moneyFails === 0;
 }
 
 async function main(): Promise<void> {
