@@ -8,6 +8,7 @@ export interface ApiKey {
   canTrade: boolean;
   canRead: boolean;
   ipWhitelist: string[];
+  expiresAt: string | null;
   createdAt: string;
   lastUsedAt: string | null;
 }
@@ -20,6 +21,8 @@ export interface IssuedApiKey {
   label: string | null;
   canTrade: boolean;
   canRead: boolean;
+  ipWhitelist: string[];
+  expiresAt: string | null;
   createdAt: string;
 }
 
@@ -27,6 +30,10 @@ export interface CreateApiKeyReq {
   label?: string;
   canRead?: boolean;
   canTrade?: boolean;
+  /** Allowed source IPs (empty/omitted = unrestricted). */
+  ipWhitelist?: string[];
+  /** Days until the key expires (omit for no expiry). 1–365. */
+  expiresInDays?: number;
   /** 6-digit TOTP code — sent when the account has 2FA enabled. */
   totpCode?: string;
 }

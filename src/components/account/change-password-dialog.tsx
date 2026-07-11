@@ -5,10 +5,13 @@ import { Button } from "@/components/ui/button";
 import { PasswordInput } from "@/components/ui/password-input";
 import { InlineError } from "@/components/ui/inline-error";
 import { ApiError } from "@/lib/api/client";
+import { useCurrentUser } from "@/lib/hooks/use-auth";
 import { useChangePassword } from "@/lib/hooks/use-security";
 import { useT } from "@/lib/i18n/provider";
 
 const MIN_LENGTH = 8;
+const TWO_FACTOR_REQUIRED = 60010;
+const INVALID_TWO_FACTOR_CODE = 60011;
 
 function PasswordField({
   label,
@@ -40,11 +43,15 @@ function PasswordField({
 export function ChangePasswordDialog({ onClose }: { onClose: () => void }) {
   const t = useT();
   const changeMut = useChangePassword();
+  const { data: user } = useCurrentUser();
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [totpCode, setTotpCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+
+  const needsTotp = user?.twoFactorEnabled === true;
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -60,6 +67,7 @@ export function ChangePasswordDialog({ onClose }: { onClose: () => void }) {
     oldPassword.length > 0 &&
     newPassword.length >= MIN_LENGTH &&
     newPassword === confirm &&
+    (!needsTotp || totpCode.length === 6) &&
     !changeMut.isPending;
 
   async function submit() {
@@ -73,10 +81,18 @@ export function ChangePasswordDialog({ onClose }: { onClose: () => void }) {
       return;
     }
     try {
-      await changeMut.mutateAsync({ oldPassword, newPassword });
+      await changeMut.mutateAsync({
+        oldPassword,
+        newPassword,
+        ...(needsTotp && totpCode !== "" ? { totpCode } : {}),
+      });
       setDone(true);
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
+      if (err instanceof ApiError && err.code === INVALID_TWO_FACTOR_CODE) {
+        setError(t("account.changePassword.invalidCode"));
+      } else if (err instanceof ApiError && err.code === TWO_FACTOR_REQUIRED) {
+        setError(t("account.changePassword.codeRequired"));
+      } else if (err instanceof ApiError && err.status === 401) {
         setError(t("account.changePassword.incorrect"));
       } else {
         setError(err instanceof Error ? err.message : t("account.changePassword.failed"));
@@ -153,6 +169,29 @@ export function ChangePasswordDialog({ onClose }: { onClose: () => void }) {
                 disabled={changeMut.isPending}
                 autoComplete="new-password"
               />
+
+              {needsTotp && (
+                <label className="flex flex-col gap-1">
+                  <span className="text-[11px] text-text-dim">
+                    {t("account.changePassword.twoFactorCode")}
+                  </span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    placeholder="123456"
+                    maxLength={6}
+                    pattern="[0-9]{6}"
+                    value={totpCode}
+                    onChange={(e) => {
+                      setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6));
+                      setError(null);
+                    }}
+                    disabled={changeMut.isPending}
+                    className="h-9 w-full bg-raised border border-line px-3 text-[13px] text-text tnum placeholder:text-text-muted focus:outline-none focus:border-accent disabled:opacity-40"
+                  />
+                </label>
+              )}
 
               {tooShort && (
                 <p className="text-[11px] text-text-muted">

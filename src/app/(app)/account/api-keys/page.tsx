@@ -15,6 +15,7 @@ const COL_KEYS = [
   "account.apiKeys.col.apiKey",
   "account.apiKeys.col.permissions",
   "account.apiKeys.col.ipRestriction",
+  "account.apiKeys.col.expires",
   "account.apiKeys.col.created",
   "account.apiKeys.col.lastUsed",
   "",
@@ -90,6 +91,9 @@ function KeyRow({
       </td>
       <td className="px-3 py-2 text-right text-text-dim tnum">
         {k.ipWhitelist.length ? k.ipWhitelist.join(", ") : "—"}
+      </td>
+      <td className="px-3 py-2 text-right text-text-dim tnum">
+        {k.expiresAt ? formatDateTime(k.expiresAt) : t("account.apiKeys.never")}
       </td>
       <td className="px-3 py-2 text-right text-text-dim tnum">{formatDateTime(k.createdAt)}</td>
       <td className="px-3 py-2 text-right text-text-dim tnum">

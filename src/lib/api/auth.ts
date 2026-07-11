@@ -8,7 +8,25 @@ export interface UserProfile {
   displayName: string | null;
   emailVerified: boolean;
   twoFactorEnabled: boolean;
+  antiPhishingCode: string | null;
   role: UserRole;
+  createdAt: string;
+}
+
+export interface SessionInfo {
+  id: string;
+  ip: string;
+  userAgent: string | null;
+  createdAt: string;
+  lastSeenAt: string;
+  current: boolean;
+}
+
+export interface LoginHistoryEntry {
+  id: string;
+  ip: string;
+  userAgent: string | null;
+  success: boolean;
   createdAt: string;
 }
 
@@ -45,11 +63,23 @@ export const authApi = {
     portalApi.post<{ ok: true }>("/auth/password/forgot", { email }),
   resetPassword: (token: string, password: string) =>
     portalApi.post<{ ok: true }>("/auth/password/reset", { token, password }),
-  changePassword: (oldPassword: string, newPassword: string) =>
-    portalApi.post<{ ok: true }>("/auth/password/change", { oldPassword, newPassword }),
+  changePassword: (oldPassword: string, newPassword: string, totpCode?: string) =>
+    portalApi.post<{ ok: true }>("/auth/password/change", { oldPassword, newPassword, totpCode }),
 
   // 2FA (TOTP)
   setup2fa: () => portalApi.post<TwoFactorSetup>("/auth/2fa/setup"),
   enable2fa: (code: string) => portalApi.post<{ ok: true }>("/auth/2fa/enable", { code }),
   disable2fa: (code: string) => portalApi.post<{ ok: true }>("/auth/2fa/disable", { code }),
+
+  // sessions
+  listSessions: () => portalApi.get<SessionInfo[]>("/auth/sessions"),
+  revokeSession: (id: string) => portalApi.del<{ ok: true }>(`/auth/sessions/${id}`),
+  revokeOtherSessions: () => portalApi.post<{ ok: true }>("/auth/sessions/revoke-others"),
+
+  // login history
+  loginHistory: () => portalApi.get<LoginHistoryEntry[]>("/auth/login-history"),
+
+  // anti-phishing code
+  setAntiPhishing: (code: string | null, totpCode?: string) =>
+    portalApi.post<UserProfile>("/auth/anti-phishing", { code, totpCode }),
 };

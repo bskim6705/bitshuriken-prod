@@ -52,10 +52,20 @@ export function CreateApiKeyDialog({
   const [label, setLabel] = useState("");
   const [canRead, setCanRead] = useState(true);
   const [canTrade, setCanTrade] = useState(false);
+  const [expiry, setExpiry] = useState<"0" | "30" | "90" | "180" | "365">("0");
+  const [ipWhitelist, setIpWhitelist] = useState("");
   const [totpCode, setTotpCode] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const needsTotp = user?.twoFactorEnabled === true;
+
+  const EXPIRY_OPTIONS: { value: typeof expiry; labelKey: string }[] = [
+    { value: "0", labelKey: "account.createApiKey.expiryNever" },
+    { value: "30", labelKey: "account.createApiKey.expiry30" },
+    { value: "90", labelKey: "account.createApiKey.expiry90" },
+    { value: "180", labelKey: "account.createApiKey.expiry180" },
+    { value: "365", labelKey: "account.createApiKey.expiry365" },
+  ];
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -67,12 +77,19 @@ export function CreateApiKeyDialog({
 
   async function submit() {
     setError(null);
+    // 콤마/개행 구분 IP 목록 → 배열
+    const ips = ipWhitelist
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter((s) => s !== "");
     try {
       const trimmed = label.trim();
       const issued = await createMut.mutateAsync({
         label: trimmed === "" ? undefined : trimmed,
         canRead,
         canTrade,
+        ...(ips.length > 0 ? { ipWhitelist: ips } : {}),
+        ...(expiry !== "0" ? { expiresInDays: Number(expiry) } : {}),
         ...(needsTotp && totpCode !== "" ? { totpCode } : {}),
       });
       onIssued(issued);
@@ -151,6 +168,37 @@ export function CreateApiKeyDialog({
               onChange={setCanTrade}
             />
           </div>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-text-dim">{t("account.createApiKey.expiry")}</span>
+            <select
+              value={expiry}
+              onChange={(e) => setExpiry(e.target.value as typeof expiry)}
+              className="h-9 w-full bg-raised border border-line px-3 text-[13px] text-text focus:outline-none focus:border-accent"
+            >
+              {EXPIRY_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {t(o.labelKey)}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-text-dim">{t("account.createApiKey.ipWhitelist")}</span>
+            <input
+              value={ipWhitelist}
+              onChange={(e) => {
+                setIpWhitelist(e.target.value);
+                setError(null);
+              }}
+              placeholder="203.0.113.7, 203.0.113.8"
+              className="h-9 w-full bg-raised border border-line px-3 text-[13px] text-text tnum placeholder:text-text-muted focus:outline-none focus:border-accent"
+            />
+            <span className="text-[11px] text-text-muted">
+              {t("account.createApiKey.ipWhitelistHint")}
+            </span>
+          </label>
 
           {needsTotp && (
             <label className="flex flex-col gap-1">
