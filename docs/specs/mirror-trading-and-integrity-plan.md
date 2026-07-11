@@ -29,13 +29,22 @@
   executedQty=0"(ADR-037 관찰) 재검증 필요, STP 부재(웟시 자유 — 의도된 경계), 엔진 독성 메시지 크래시 루프,
   관찰 #17(단일 stop 취소 앞지름 — 스키마 변경 필요라 보류).
 
-## 2. Phase 0 — 기준선
+## 2. Phase 0 — 기준선 (진행 상황 2026-07-12)
 
-1. BE 미커밋 2묶음(계정 보안 / 거래 보호) + 이번 버그 수정 커밋 — **유저**
-2. `npx prisma migrate dev --name session-login-history` (Session/LoginHistory 스키마 델타) — **유저**
-3. 풀스택 기동(`docker compose up -d` + `./scripts/up.sh`) + e2e 4종 실행
-4. `test/integrity`에서 dex/options 스위트 제거, run-all/README를 prod 3앱 기준으로 정리
-5. 라이브 정합성 1회 실행 → **기준선 리포트** `docs/test-reports/`에 기록
+1. ✅ BE 미커밋 2묶음(계정 보안 / 거래 보호) + 버그 수정 #2/#3 커밋
+2. ✅ `prisma migrate dev --name account-security` (유저 실행) + 마이그레이션 커밋
+3. ✅ e2e 53/53 통과 (Kafka 기동 후). 유닛 295/295.
+4. ✅ `test/integrity` dex/options 제거, run-all/README를 prod 3앱 기준으로 정리
+5. ⏳ 라이브 정합성 1회 실행 → **기준선 리포트** `docs/test-reports/` (봇 기동 후 — Phase 2 이후)
+
+**구현 완료(2026-07-12), 실행만 남음:**
+- `bitshuriken-prod-bots` — Binance/Upbit 미러링 봇 + F1~F4 체커 + scan (typecheck 클린, ADR-066)
+- `bitshuriken-prod-agents` — 전략 러너(서브계정+HMAC, Sim/Live 브로커, 시드 전략) (typecheck 클린)
+- BE — KRW 계단식 tick 검증 + exchange-info priceTiers + `User.rateLimitExempt` 플래그 + admin 면제 엔드포인트
+- KRW 자산/티커 시드 (USDTKRW/BTCKRW/ETHKRW/XRPKRW/SOLKRW), 매칭엔진 config 추가
+
+**⏸ 실행 전 유저 액션 1건: 2차 마이그레이션** (`User.rateLimitExempt` + `AssetType.FIAT`) —
+`cd bitshuriken-prod-be && npx prisma migrate dev --name rate-limit-exempt-krw` → 이후 `npx prisma db seed`.
 
 ## 3. Phase 1 — 정합성 측정기 v1 (F1~F4)
 
