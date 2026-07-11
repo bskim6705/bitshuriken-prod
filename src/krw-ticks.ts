@@ -17,11 +17,12 @@ const KRW_TIERS: Tier[] = [
   { min: 500_000, tick: 100 },
   { min: 100_000, tick: 50 },
   { min: 10_000, tick: 10 },
-  { min: 1_000, tick: 1 },
-  { min: 100, tick: 0.1 },
-  { min: 10, tick: 0.01 },
-  { min: 1, tick: 0.001 },
-  { min: 0.1, tick: 0.0001 },
+  { min: 1_000, tick: 5 },
+  { min: 100, tick: 1 },
+  { min: 10, tick: 0.1 },
+  { min: 1, tick: 0.01 },
+  { min: 0.1, tick: 0.001 },
+  { min: 0.01, tick: 0.0001 },
   { min: 0, tick: 0.00001 },
 ];
 
