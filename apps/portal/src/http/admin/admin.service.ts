@@ -388,6 +388,17 @@ export class AdminService {
     };
   }
 
+  /** 레이트리밋 면제 토글 (시장 조성 계정). service(X-Admin-Secret) 또는 세션 admin. */
+  async setRateLimitExempt(targetUserId: string, exempt: boolean) {
+    await this.assertUserExists(targetUserId);
+    const user = await this.prisma.user.update({
+      where: { id: targetUserId },
+      data: { rateLimitExempt: exempt },
+      select: { id: true, rateLimitExempt: true },
+    });
+    return { userId: user.id, rateLimitExempt: user.rateLimitExempt };
+  }
+
   // ---- platform overview (dashboard) ----
 
   /** 플랫폼 재무/통계 집계 (read-only). 금액은 fixed-8, time은 epoch ms. */

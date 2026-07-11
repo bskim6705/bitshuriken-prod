@@ -5,6 +5,7 @@ import { isLimitLike } from '@app/shared/order-classify';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
 import { SPOT_PRICE_BAND_PCT } from '@app/shared/constants/trading-protection';
+import { isKrwTickAligned, krwTickSize } from '@app/shared/constants/krw-tick';
 
 const BAND_PCT = new Decimal(SPOT_PRICE_BAND_PCT);
 const ONE = new Decimal(1);
@@ -132,10 +133,19 @@ function validateMarketLikeQty(
  */
 export function validateAgainstMeta(input: MetaValidationInput): void {
   const { meta } = input;
+  // KRW-quote 마켓은 Upbit 계단식 호가단위 — 소수 자릿수 대신 tier tick 정렬로 검증 (ADR-066).
+  const krw = meta.quoteAsset === 'KRW';
 
   if (input.price !== null) {
     requirePositive(input.price, 'price');
-    if (input.price.decimalPlaces() > meta.pricePrecision) {
+    if (krw) {
+      if (!isKrwTickAligned(input.price)) {
+        throw new DomainException(
+          ErrorCode.INVALID_PRICE,
+          `price must be a multiple of ${krwTickSize(input.price).toFixed()} KRW at this price`,
+        );
+      }
+    } else if (input.price.decimalPlaces() > meta.pricePrecision) {
       throw new DomainException(
         ErrorCode.INVALID_PRICE,
         `price must have at most ${meta.pricePrecision} decimals`,
@@ -155,7 +165,14 @@ export function validateAgainstMeta(input: MetaValidationInput): void {
   }
   if (input.stopPrice !== null) {
     requirePositive(input.stopPrice, 'stopPrice');
-    if (input.stopPrice.decimalPlaces() > meta.pricePrecision) {
+    if (krw) {
+      if (!isKrwTickAligned(input.stopPrice)) {
+        throw new DomainException(
+          ErrorCode.INVALID_PRICE,
+          `stopPrice must be a multiple of ${krwTickSize(input.stopPrice).toFixed()} KRW at this price`,
+        );
+      }
+    } else if (input.stopPrice.decimalPlaces() > meta.pricePrecision) {
       throw new DomainException(
         ErrorCode.INVALID_PRICE,
         `stopPrice must have at most ${meta.pricePrecision} decimals`,

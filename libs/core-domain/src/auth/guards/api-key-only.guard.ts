@@ -124,7 +124,7 @@ export class ApiKeyOnlyGuard implements CanActivate {
     // req.user 통일
     const user = await this.prisma.user.findUnique({
       where: { id: record.userId },
-      select: { id: true, email: true, role: true },
+      select: { id: true, email: true, role: true, rateLimitExempt: true },
     });
     if (!user)
       throw new DomainException(
@@ -137,6 +137,7 @@ export class ApiKeyOnlyGuard implements CanActivate {
       userId: user.id,
       email: user.email,
       role: user.role,
+      rateLimitExempt: user.rateLimitExempt,
     };
     return true;
   }

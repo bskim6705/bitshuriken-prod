@@ -13,9 +13,12 @@ import { fmtScaled } from '@app/shared/decimal';
 import { Weight } from '@app/shared/rate-limit/weight.decorator';
 import { buildRateLimits } from '@app/shared/rate-limit/rate-limit.config';
 import { limitsForApp } from '@app/shared/rate-limit/rate-limit.defaults';
+import { krwTierTable } from '@app/shared/constants/krw-tick';
 
 const MAX_DEPTH_LEVELS = 50;
 const DEFAULT_KLINE_LIMIT = 500;
+// KRW exchange-info tickSize는 tier 표의 최소 tick(가장 미세). priceTiers가 실제 tier를 담는다.
+const KRW_MIN_TICK = krwTierTable()[krwTierTable().length - 1].tickSize;
 
 const TICKER_WINDOW_MS: Record<string, number> = {
   '1h': 60 * 60 * 1000,
@@ -77,17 +80,22 @@ export class MarketController {
     },
   })
   exchangeInfo() {
-    const symbols = this.tickerStats.metaAll(MarketType.SPOT).map((m) => ({
-      symbol: m.symbol,
-      baseAsset: m.baseAsset,
-      quoteAsset: m.quoteAsset,
-      pricePrecision: m.pricePrecision,
-      qtyPrecision: m.qtyPrecision,
-      tickSize: sizeFromPrecision(m.pricePrecision),
-      stepSize: sizeFromPrecision(m.qtyPrecision),
-      minNotional: m.minNotional.toFixed(8),
-      ocoAllowed: true, // 플랫폼 상수 — 전 심볼 OCO 허용
-    }));
+    const symbols = this.tickerStats.metaAll(MarketType.SPOT).map((m) => {
+      const krw = m.quoteAsset === 'KRW';
+      return {
+        symbol: m.symbol,
+        baseAsset: m.baseAsset,
+        quoteAsset: m.quoteAsset,
+        pricePrecision: m.pricePrecision,
+        qtyPrecision: m.qtyPrecision,
+        // KRW 마켓은 계단식 호가 — tickSize는 최소 tick, priceTiers가 실제 tier 표 (ADR-066)
+        tickSize: krw ? KRW_MIN_TICK : sizeFromPrecision(m.pricePrecision),
+        ...(krw ? { priceTiers: krwTierTable() } : {}),
+        stepSize: sizeFromPrecision(m.qtyPrecision),
+        minNotional: m.minNotional.toFixed(8),
+        ocoAllowed: true, // 플랫폼 상수 — 전 심볼 OCO 허용
+      };
+    });
     return {
       serverTime: Date.now(),
       klineIntervals: [...KLINE_INTERVALS],

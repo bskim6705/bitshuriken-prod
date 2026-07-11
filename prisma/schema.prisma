@@ -15,6 +15,7 @@ enum MarketType {
 enum AssetType {
   CRYPTO
   STABLECOIN
+  FIAT
 }
 
 model Asset {
@@ -54,6 +55,8 @@ model User {
   parentUserId   String?
   // 모든 발신 메일 상단에 표시되는 사용자 지정 코드. 피싱 메일 식별용. 2FA 게이트로만 설정.
   antiPhishingCode String?
+  // 레이트리밋 면제 — 시장 조성(미러링) 계정용. admin/service만 설정 (ADR-066).
+  rateLimitExempt Boolean @default(false)
   createdAt      DateTime @default(now())
 
   parent      User?       @relation("Subaccounts", fields: [parentUserId], references: [id])

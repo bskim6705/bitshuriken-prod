@@ -101,6 +101,8 @@ export class RateLimitInterceptor implements NestInterceptor {
   }
 
   private isExempt(req: RlRequest): boolean {
+    // 시장 조성 계정(rateLimitExempt) — API 키 인증 경로에서 채워짐 (ADR-066)
+    if (req.user?.rateLimitExempt === true) return true;
     const token = this.config.internalToken;
     return token !== '' && req.headers['x-internal-token'] === token;
   }

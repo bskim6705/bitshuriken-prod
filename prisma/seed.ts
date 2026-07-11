@@ -74,6 +74,7 @@ const ASSET_META: Record<string, { name: string; type: AssetType; precision: num
   DASH: { name: 'Dash', type: 'CRYPTO', precision: 8 },
   USDT: { name: 'Tether', type: 'STABLECOIN', precision: 6 },
   USDC: { name: 'USD Coin', type: 'STABLECOIN', precision: 6 },
+  KRW: { name: 'South Korean Won', type: 'FIAT', precision: 0 }, // Upbit quote (ADR-066)
 };
 
 function parseTickerConfig(): TickerConfig[] {
@@ -151,7 +152,7 @@ const FUTURES_CONFIG_DEFAULTS = {
 
 // BTCUSDT → { base: 'BTC', quote: 'USDT' }. 지원 quote 중 suffix 매칭.
 function splitSymbol(symbol: string): { base: string; quote: string } {
-  for (const quote of ['USDT', 'USDC', 'BTC', 'ETH']) {
+  for (const quote of ['USDT', 'USDC', 'KRW', 'BTC', 'ETH']) {
     if (symbol.endsWith(quote)) {
       return { base: symbol.slice(0, -quote.length), quote };
     }
@@ -196,7 +197,8 @@ async function main(): Promise<void> {
       // 엔진 정수 floor와 정산 잠금 회계가 일치하기 위한 전제
       throw new Error(`${t.symbol}: pricePrecision + qtyPrecision must be <= 8`);
     }
-    const minNotional = quote === 'USDT' || quote === 'USDC' ? '5' : '0';
+    const minNotional =
+      quote === 'KRW' ? '5000' : quote === 'USDT' || quote === 'USDC' ? '5' : '0';
     await prisma.ticker.upsert({
       where: { symbol_marketType: { symbol: t.symbol, marketType } },
       // partition도 갱신 — 버킷(0..P-1) 재배정 시 재시드로 기존 ticker 반영
