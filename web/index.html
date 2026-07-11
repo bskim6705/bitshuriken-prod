@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bitshuriken agents</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">bitshuriken <span class="dim">agents</span></div>
+      <div class="health" id="health">
+        <span class="stat"><span class="k">status</span><span class="v" id="h-status">—</span></span>
+        <span class="stat"><span class="k">uptime</span><span class="v" id="h-uptime">—</span></span>
+        <span class="stat"><span class="k">agents</span><span class="v" id="h-agents">—</span></span>
+        <span class="stat"><span class="k">strategies</span><span class="v" id="h-strategies">—</span></span>
+      </div>
+      <div class="controls">
+        <span class="updated" id="updated"></span>
+        <button id="refresh" class="btn">Refresh</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <main class="grid">
+      <section class="card span2">
+        <h2>Agents</h2>
+        <div class="scroll">
+          <table id="agents">
+            <thead>
+              <tr>
+                <th>ID</th><th>Strategy</th><th>Symbol</th><th>Status</th>
+                <th class="num">Equity</th><th class="num">Position</th><th class="num">Errors</th><th>Integrity</th>
+              </tr>
+            </thead>
+            <tbody id="agents-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Performance ranking</h2>
+          <select id="objective" class="select">
+            <option value="sharpe">Sharpe</option>
+            <option value="roi">ROI</option>
+            <option value="totalPnl">Total PnL</option>
+          </select>
+        </div>
+        <div class="scroll">
+          <table id="ranking">
+            <thead>
+              <tr>
+                <th>#</th><th>Strategy</th><th>Symbol</th>
+                <th class="num">ROI</th><th class="num">PnL</th><th class="num">Sharpe</th>
+                <th class="num">MaxDD</th><th class="num">Win</th><th class="num">Trades</th>
+              </tr>
+            </thead>
+            <tbody id="ranking-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Integrity <span class="dim">정합성</span></h2>
+          <span class="dim small" id="integrity-time"></span>
+        </div>
+        <div id="integrity-body" class="integrity"></div>
+      </section>
+
+      <section class="card span2" id="detail-card">
+        <div class="card-head">
+          <h2 id="detail-title">Agent detail</h2>
+          <span class="dim small" id="detail-sub"></span>
+        </div>
+        <div id="detail-body" class="detail">
+          <p class="dim">Select an agent above.</p>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

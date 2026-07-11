@@ -1,0 +1,55 @@
+name: bitshuriken-prod-agents
+
+# Trading-agent daemon — a SEPARATE service, NOT part of bitshuriken-prod-infra's core
+# stack (feedback-023: each service owns its own deployment). It deploys on its own:
+# image built by this repo, pulled + run here.
+#
+# It attaches to the core exchange's docker network as EXTERNAL so it can reach the
+# backend by internal DNS (be-spot / be-futures / be-portal). That network is created
+# by bitshuriken-prod-infra (network name: bitshuriken_internal) — bring the exchange up
+# there first, then here:
+#   docker compose up -d --build
+#
+# If instead this runs on a DIFFERENT host, drop the external network and point the
+# *_API vars at the public API (e.g. https://<host>/api/spot).
+#
+# The management dashboard + control API are auth-less (internal dev tool) — 5120 is
+# published to 127.0.0.1 ONLY; reach it over an SSH tunnel, never expose it.
+#
+# Live liquidity (mirrors): bots are a normal-user service that deploys separately
+# (feedback-023/025). Ticker activation works with ADMIN_API_SECRET; spawning a bots
+# mirror from this container additionally needs the bots repo mounted at BOTS_DIR.
+
+services:
+  agentd:
+    build: .
+    image: bitshuriken-prod-agents:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5120:5120" # dashboard + control API — localhost only (SSH tunnel)
+    environment:
+      SPOT_API: http://be-spot:5101
+      FUTURES_API: http://be-futures:5102
+      PORTAL_API: http://be-portal:5103
+      CONTROL_HOST: 0.0.0.0 # bind inside the container so the published port is reachable
+      CONTROL_PORT: 5120
+      MASTER_EMAIL: ${MASTER_EMAIL:-agents-master@agents.local}
+      MASTER_PASSWORD: ${MASTER_PASSWORD:?set MASTER_PASSWORD}
+      AGENT_CAPITAL_USDT: ${AGENT_CAPITAL_USDT:-1000000}
+      # Ticker activation (X-Admin-Secret) — match the backend's ADMIN_API_SECRET.
+      ADMIN_API_SECRET: ${ADMIN_API_SECRET:-}
+      # Optional: set to the backend's RATE_LIMIT_INTERNAL_TOKEN to exempt agent traffic
+      # (policy deferred — feedback-025; empty = normal user traffic).
+      AGENT_INTERNAL_TOKEN: ${AGENT_INTERNAL_TOKEN:-}
+      DATA_DIR: /app/data
+    volumes:
+      - agentdata:/app/data # persist agent records + subaccount creds across restarts (resume)
+    networks: [exchange]
+
+networks:
+  exchange:
+    external: true
+    name: bitshuriken_internal
+
+volumes:
+  agentdata:
