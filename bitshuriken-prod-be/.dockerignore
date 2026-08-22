@@ -1,0 +1,14 @@
+node_modules
+dist
+generated
+.git
+.github
+.env
+.env.*
+*.log
+coverage
+test
+**/*.spec.ts
+.DS_Store
+Dockerfile
+.dockerignore
