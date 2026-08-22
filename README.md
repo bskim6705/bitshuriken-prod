@@ -47,6 +47,16 @@ Windows에서는 **WSL2 + Docker Desktop의 WSL integration** 환경에서 저�
 clone한 뒤 위 Linux 명령을 그대로 실행한다. PowerShell/CMD에서 `exchange.sh`를 직접 실행하는
 경로는 지원하지 않는다.
 
+Ubuntu WSL 기준 기본 도구:
+
+```bash
+sudo apt update
+sudo apt install -y build-essential curl git jq lsof procps python3 python3-venv
+```
+
+Node.js 22와 npm은 WSL 내부에 설치하고, Docker Desktop 설정에서 사용하는 WSL 배포판의
+integration을 활성화한다.
+
 ## Prod deploy
 
 GHCR 이미지 pull 기반 단일 호스트 배포 — [bitshuriken-prod-infra/README.md](bitshuriken-prod-infra/README.md) (ADR-062).

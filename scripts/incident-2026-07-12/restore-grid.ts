@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
-import { MasterClient, SubaccountClient, exchangeInfo } from '/Users/kitsune/bitshuriken/bitshuriken-prod/bitshuriken-prod-agents/src/core/exchange';
-import { config } from '/Users/kitsune/bitshuriken/bitshuriken-prod/bitshuriken-prod-agents/src/config';
+import { MasterClient, SubaccountClient, exchangeInfo } from '../../bitshuriken-prod-agents/src/core/exchange';
+import { config } from '../../bitshuriken-prod-agents/src/config';
 
 // 2026-07-12 사고 복구: cleanup 도구가 취소해버린 라이브 grid(d13695)의 BUY 사다리 240건을
 // DB 원장(취소 직전 가격·잔량) 그대로 재배치한다. 전략의 in-memory 상태(onFill 폴링)와 정합.
