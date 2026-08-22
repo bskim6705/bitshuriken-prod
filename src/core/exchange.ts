@@ -358,6 +358,30 @@ export class SubaccountClient {
     });
   }
 
+  /** marketable limit taker (IOC): fills up to `price`, cancels the rest. Caps slippage to the
+   *  limit — the right primitive for thin-margin arbitrage legs (MARKET would sweep and slip). */
+  placeLimitIoc(spec: SymbolSpec, side: Side, price: string, qty: string): Promise<LocalOrder> {
+    if (spec.market === 'SPOT') {
+      return this.signed<LocalOrder>(config.api.spot, 'POST', '/spot/trading/orders', {}, {
+        tickerSymbol: spec.symbol,
+        tickerMarket: 'SPOT',
+        type: 'LIMIT',
+        side,
+        timeInForce: 'IOC',
+        price,
+        origQty: qty,
+      });
+    }
+    return this.signed<LocalOrder>(config.api.futures, 'POST', '/futures/trading/orders', {}, {
+      symbol: spec.symbol,
+      type: 'LIMIT',
+      side,
+      timeInForce: 'IOC',
+      price,
+      qty,
+    });
+  }
+
   cancel(market: Market, orderId: string): Promise<unknown> {
     const path = market === 'SPOT' ? `/spot/trading/orders/${orderId}` : `/futures/trading/orders/${orderId}`;
     return this.signed(apiBase(market), 'DELETE', path);

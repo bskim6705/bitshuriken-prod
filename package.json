@@ -9,7 +9,15 @@
     "cli": "tsx src/cli.ts",
     "mcp": "tsx src/mcp.ts",
     "backtest": "tsx src/backtest-cli.ts",
-    "typecheck": "tsc --noEmit"
+    "arb": "tsx src/arb/run.ts",
+    "obook": "tsx src/obook/run.ts",
+    "maker": "tsx src/maker/run.ts",
+    "cleanup": "tsx src/cleanup.ts",
+    "probe:precision": "tsx src/probe/precision.ts",
+    "probe:churn": "tsx src/probe/churn.ts",
+    "probe:selfcross": "tsx src/probe/selfcross.ts",
+    "typecheck": "tsc --noEmit",
+    "probe:fee": "tsx src/probe/fee.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

@@ -48,6 +48,7 @@ export interface LocalOrder {
   status: string;
   side?: Side;
   type?: string;
+  tickerSymbol?: string;
   price: string | null;
   origQty: string | null;
   executedQty: string;

@@ -1,6 +1,6 @@
 import * as crypto from 'crypto';
 import { config } from '../config';
-import { MasterClient, SubaccountClient, exchangeInfo, type SubaccountCreds } from '../core/exchange';
+import { MasterClient, SubaccountClient, exchangeInfo, request, type SubaccountCreds } from '../core/exchange';
 import { makeLogger } from '../core/logger';
 import type { Market, SymbolSpec } from '../core/types';
 import { withDefaults, type StrategyParams } from '../strategy/types';
@@ -14,6 +14,17 @@ import { BotManager } from './bot-manager';
 import { AgentRunner } from './agent';
 
 const log = makeLogger('supervisor');
+
+/** Move a subaccount's own USDT SPOT↔FUTURES (per-account transfer), signed with its API
+ *  key. deposit()/subaccount-transfers only reach SPOT, so this is the one primitive that
+ *  can fund a perp's FUTURES margin wallet. Same HMAC canonical as SubaccountClient.signed. */
+async function accountTransfer(creds: SubaccountCreds, fromMarket: Market, toMarket: Market, qty: string): Promise<void> {
+  const usp = new URLSearchParams({ timestamp: String(Date.now()), recvWindow: String(config.agent.recvWindowMs) });
+  const qs = usp.toString();
+  const body = JSON.stringify({ fromMarket, toMarket, assetSymbol: 'USDT', qty });
+  const signature = crypto.createHmac('sha256', creds.secret).update(qs + body).digest('hex');
+  await request(`${config.api.portal}/account/transfers?${qs}&signature=${signature}`, 'POST', { 'X-API-KEY': creds.apiKey, 'Content-Type': 'application/json' }, body);
+}
 
 export interface StartAgentArgs {
   strategyId: string;
@@ -59,7 +70,6 @@ export class Supervisor {
   // ---- agents ----
   async startAgent(args: StartAgentArgs): Promise<ReturnType<AgentRunner['status']>> {
     const market = args.market ?? 'SPOT';
-    if (market === 'FUTURES') throw new Error('live FUTURES agents are not supported yet (no engine fills); use backtest');
     const factory = this.registry.get(args.strategyId);
     if (!factory) throw new Error(`unknown strategy "${args.strategyId}"`);
     const spec = await this.getSpec(market, args.symbol);
@@ -74,11 +84,19 @@ export class Supervisor {
     // create + fund the subaccount, then issue its trading key. On any failure after
     // creation, refund the subaccount back to the master so no funded orphan leaks.
     const sub = await this.master.createSubaccount(label);
+    let creds: SubaccountCreds | undefined;
     try {
       await this.master.deposit('USDT', String(capital));
       await this.master.transfer(this.master.userId!, sub.id, 'USDT', String(capital), 'SPOT');
       const key = await this.master.issueApiKey(sub.id, `${label} key`);
-      log.ok(`subaccount ${sub.id} funded ${capital} USDT`);
+      creds = { apiKey: key.apiKey, secret: key.secret };
+      if (market === 'FUTURES') {
+        // the sub moves its own SPOT→FUTURES (perp margin lives in the FUTURES wallet),
+        // then sets leverage on the now-flat position before the strategy's first order.
+        await accountTransfer(creds, 'SPOT', 'FUTURES', String(capital));
+        await new SubaccountClient(label, creds).setLeverage(args.symbol, Number(params.leverage ?? 2));
+      }
+      log.ok(`subaccount ${sub.id} funded ${capital} USDT${market === 'FUTURES' ? ` → FUTURES ${Number(params.leverage ?? 2)}x` : ''}`);
 
       const record: StoredAgent = {
         id: shortId,
@@ -93,7 +111,7 @@ export class Supervisor {
         createdAt: Date.now(),
         status: 'running',
         equityCurve: [],
-        creds: { apiKey: key.apiKey, secret: key.secret },
+        creds,
       };
 
       const runner = this.buildRunner(record, spec);
@@ -102,6 +120,8 @@ export class Supervisor {
       return runner.status();
     } catch (e) {
       this.releaseClock(spec.market, spec.symbol); // drop a clock created for an agent that never started
+      // refund back to the master: perp margin must return FUTURES→SPOT before the sub-transfer.
+      if (market === 'FUTURES' && creds) await accountTransfer(creds, 'FUTURES', 'SPOT', String(capital)).catch(() => {});
       await this.master.transfer(sub.id, this.master.userId!, 'USDT', String(capital), 'SPOT').catch(() => {});
       throw e;
     }

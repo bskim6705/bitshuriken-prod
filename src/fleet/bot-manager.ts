@@ -55,7 +55,7 @@ export class BotManager {
       symbol,
       pricePrecision: spec.pricePrecision,
       qtyPrecision: spec.qtyPrecision,
-      minNotional: spec.minNotional,
+      minNotional: String(spec.minNotional),
     });
     this.log.warn(`created new ticker ${symbol} (status ${created.status})`);
     return {

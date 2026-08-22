@@ -103,7 +103,16 @@ export class SimBroker implements ExecutionContext {
       else stillDue.push(m);
     }
     this.dueMarkets = stillDue;
-    this.restingLimits = this.restingLimits.filter((l) => !this.tryCrossLimit(l, bar));
+    // Cross a snapshot of the current book; onFill (via tryCrossLimit→fill→fillCb) may submit
+    // new limits into this.restingLimits, so drain it first and merge those new orders back in.
+    // New orders are not re-crossed this bar (they become active next bar — latency semantics).
+    const toCross = this.restingLimits;
+    this.restingLimits = [];
+    const kept: RestingLimit[] = [];
+    for (const l of toCross) {
+      if (!this.tryCrossLimit(l, bar)) kept.push(l);
+    }
+    this.restingLimits = kept.concat(this.restingLimits);
     this.mark = bar.close;
   }
 

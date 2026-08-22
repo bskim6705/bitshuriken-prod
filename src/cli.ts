@@ -19,7 +19,7 @@ const USAGE = `bitshuriken-agents cli — talks to agentd (${'`npm run daemon`'}
   status
   strategies
   agents
-  start <strategyId> <symbol> [capital=<usdt>] [mirror=true] [<k>=<v> ...]
+  start <strategyId> <symbol> [capital=<usdt>] [market=SPOT|FUTURES] [mirror=true] [<k>=<v> ...]
   stop <agentId>
   tickers
   ensure-ticker <symbol> [market]
@@ -48,11 +48,20 @@ async function main(): Promise<void> {
       if (!strategyId || !symbol) throw new Error('start <strategyId> <symbol> [capital=n] [k=v ...]');
       const params = kv(rest);
       const capitalUsdt = params.capital;
+      const market = params.market; // SPOT | FUTURES (recognized like capital=/mirror=)
       const withMirror = params.mirror === 'true' || params.mirror === 1;
       delete params.capital;
       delete params.mirror;
+      delete params.market;
       return print(
-        await client.startAgent({ strategyId, symbol, params, withMirror, ...(capitalUsdt !== undefined ? { capitalUsdt } : {}) }),
+        await client.startAgent({
+          strategyId,
+          symbol,
+          params,
+          withMirror,
+          ...(capitalUsdt !== undefined ? { capitalUsdt } : {}),
+          ...(market !== undefined ? { market } : {}),
+        }),
       );
     }
     case 'stop':

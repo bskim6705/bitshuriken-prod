@@ -23,13 +23,16 @@ export interface CreateTickerInput {
   pricePrecision: number;
   qtyPrecision: number;
   symbol?: string;
-  minNotional?: number;
+  // BE CreateTickerDto는 @IsNumberString — 숫자로 보내면 400 (2026-07-12 실측)
+  minNotional?: string;
 }
 
 /**
  * Admin surface for ticker provisioning, authenticated with the service `X-Admin-Secret`
  * header (no session). Used to list tickers and flip a seeded ticker to TRADING so live
- * agents have a market. Creating a brand-new symbol needs a match-engine restart.
+ * agents have a market. Brand-new symbols propagate restart-free (BE가 match.*.control
+ * 토픽으로 ADD를 발행, 엔진이 라이브로 lane 삽입). 단 FUTURES 단독 상장은 mark price가
+ * 로컬 SPOT 체결에서만 나오므로 같은 심볼의 SPOT 시장 없이는 거래 불가 (관찰 #20).
  */
 export class AdminClient {
   constructor(private readonly secret: string = config.adminSecret) {}
