@@ -5,6 +5,11 @@ from sortedcontainers import SortedDict
 
 from .order import Order, OrderSide
 
+# 종결(FILLED/CANCELED)된 order id를 lane당 이만큼 FIFO로 기억한다. 중복 NO 재매칭 방어
+# (observation #24). 상한이 있어 메모리는 bounded — 이 창을 넘겨 지연 도착한 중복은
+# best-effort로만 방어된다(분석은 refactor-observations #24). 정책 상수라 코드에 둔다.
+TERMINATED_MEMORY_CAPACITY = 50_000
+
 
 class OrderBook:
     """단일 ticker의 가격-시간 우선 호가창.
@@ -36,11 +41,27 @@ class OrderBook:
         # 마지막 drain 이후 변경된 (side, price). depth diff publish용.
         self._dirty: set[tuple[OrderSide, int]] = set()
 
+        # 최근 종결(FILLED/CANCELED)된 order id의 bounded FIFO. resting이 아니라
+        # book에 없는 종결 id의 중복 NO 재매칭을 막는다 (observation #24). 값=None.
+        self._terminated: "OrderedDict[str, None]" = OrderedDict()
+
     # ---------- read ----------
 
     def contains(self, order_id: str) -> bool:
         """호가창에 resting 중인 주문인지. 중복 NEW 멱등 처리에 사용."""
         return order_id in self._index
+
+    def was_terminated(self, order_id: str) -> bool:
+        """최근 종결된(북에서 사라진) id인지. 종결 id의 중복 NO 재매칭 방어."""
+        return order_id in self._terminated
+
+    def remember_terminated(self, order_id: str) -> None:
+        """id를 종결 기록에 추가. 상한 초과 시 가장 오래된 id를 O(1) 축출."""
+        if order_id in self._terminated:
+            return
+        self._terminated[order_id] = None
+        if len(self._terminated) > TERMINATED_MEMORY_CAPACITY:
+            self._terminated.popitem(last=False)
 
     def best_bid_price(self) -> Optional[int]:
         if not self._bids:

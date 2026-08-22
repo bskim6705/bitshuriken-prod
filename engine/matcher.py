@@ -32,9 +32,14 @@ class MatchEngine:
         trades: list[Trade] = []
         updated: list[Order] = []
 
-        # 0. 멱등성 — 이미 resting 중인 id의 중복 NEW는 무시(at-least-once 재전송 대비).
-        #    복구 시 BE가 NO를 재드라이브해도 이중 매칭/중복 add를 막는다.
-        if book.contains(taker.id):
+        # 0. 중복 order id — 실거래소 기준 duplicate order id는 조용히 삼키지 않고 REJECTED로
+        #    통지한다. 방어 대상 두 가지: (1) 아직 resting 중인 id(중복 add/재매칭 방지,
+        #    incident 2026-07-14 lane stall), (2) 이미 종결(FILLED/CANCELED)돼 북에서 사라진 id
+        #    — 종결 id에 중복 NO가 오면 fresh taker로 재매칭돼 exec>orig 팬텀 체결이 났다
+        #    (observation #24). was_terminated로 O(1) 방어.
+        if book.contains(taker.id) or book.was_terminated(taker.id):
+            taker.status = OrderStatus.REJECTED
+            updated.append(taker)
             return MatchResult(trades, updated)
 
         # 1. POST_ONLY 사전 체크
@@ -57,6 +62,7 @@ class MatchEngine:
         # 4. 잔여 처리
         if self._is_done(taker):
             taker.status = OrderStatus.FILLED
+            book.remember_terminated(taker.id)  # 종결 — 중복 NO 재매칭 방어 (#24)
             updated.append(taker)
             return MatchResult(trades, updated)
 
@@ -64,6 +70,7 @@ class MatchEngine:
         if taker.type == OrderType.MARKET or tif == TimeInForce.IOC:
             has_filled = taker.executed_qty > 0
             taker.status = OrderStatus.PARTIAL if has_filled else OrderStatus.CANCELED
+            book.remember_terminated(taker.id)  # IOC/MARKET 잔여는 rest 안 함 → 종결 (#24)
             updated.append(taker)
         else:
             # LIMIT/POST_ONLY + GTC: 호가창에 rest
@@ -77,6 +84,7 @@ class MatchEngine:
         order = book.cancel(order_id)
         if order is not None:
             order.status = OrderStatus.CANCELED
+            book.remember_terminated(order_id)  # 종결 — 중복 NO 재매칭 방어 (#24)
         return order
 
     # ---------- helpers ----------
@@ -168,6 +176,7 @@ class MatchEngine:
                 book.cancel(maker.id)
                 maker.executed_qty += fill_qty
                 maker.status = OrderStatus.FILLED
+                book.remember_terminated(maker.id)  # 종결 — 중복 NO 재매칭 방어 (#24)
                 updated.append(maker)
             else:
                 book.partial_fill(maker, fill_qty)  # executed_qty 증가 포함

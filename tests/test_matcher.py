@@ -69,20 +69,26 @@ def rest_limit(engine: MatchEngine, book: OrderBook, side: OrderSide, p: str, q:
 # ---------- 멱등성 (중복 NEW 재드라이브) ----------
 
 
-def test_duplicate_new_order_is_ignored(engine, book):
-    """이미 resting인 id의 중복 NEW는 무시 — 이중 매칭/중복 add 방지(복구 재드라이브 안전)."""
+def test_duplicate_active_order_id_is_rejected(engine, book):
+    """이미 active(resting)한 id로 온 NEW는 조용히 삼키지 않고 REJECTED로 통지한다.
+    재매칭/중복 add는 여전히 없고 resting 주문·seq는 불변 — 삼킴 대신 발행만 추가.
+    (Kafka는 매번 새 Order를 역직렬화하므로 resting과 다른 인스턴스가 같은 id로 온다.)"""
     maker = rest_limit(engine, book, OrderSide.SELL, "100", "5")
     # 매칭 가능한 반대편 BUY를 책에 거치(cross 아님: 99 < 100)
     rest_limit(engine, book, OrderSide.BUY, "99", "5")
     seq_before = book.seq
 
-    result = engine.submit_new_order(book, maker)  # 같은 id 재제출
+    dup = make_order(OrderSide.BUY, tif=TimeInForce.IOC, p="100", oq="1", user="taker")
+    dup.id = maker.id  # 같은 id, 다른 주문 인스턴스
+
+    result = engine.submit_new_order(book, dup)
 
     assert result.trades == []  # 재매칭 없음
-    assert result.updated_orders == []
-    assert book.contains(maker.id)
+    assert result.updated_orders == [dup]  # 삼키지 않고 통지
+    assert dup.status == OrderStatus.REJECTED  # 중복 active id → REJECTED
+    assert book.contains(maker.id)  # resting 주문 유지
+    assert maker.status == OrderStatus.OPEN  # resting 주문 불변
     assert book.seq == seq_before  # 책 무변경(add/cancel/매칭 없음)
-    assert maker.status == OrderStatus.OPEN
 
 
 class TestBaseDrivenMarketBuy:

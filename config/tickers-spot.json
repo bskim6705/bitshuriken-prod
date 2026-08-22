@@ -384,6 +384,34 @@
       "partition": 1,
       "pricePrecision": 0,
       "qtyPrecision": 8
+    },
+    {
+      "market": "spot",
+      "symbol": "OPNUSDT",
+      "partition": 0,
+      "pricePrecision": 4,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "spot",
+      "symbol": "MUBUSDT",
+      "partition": 3,
+      "pricePrecision": 2,
+      "qtyPrecision": 3
+    },
+    {
+      "market": "spot",
+      "symbol": "ALLOUSDT",
+      "partition": 3,
+      "pricePrecision": 4,
+      "qtyPrecision": 1
+    },
+    {
+      "market": "spot",
+      "symbol": "SNDKBUSDT",
+      "partition": 3,
+      "pricePrecision": 2,
+      "qtyPrecision": 4
     }
   ]
 }
