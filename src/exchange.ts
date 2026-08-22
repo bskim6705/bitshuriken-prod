@@ -4,6 +4,9 @@ import type { Balance, DepthSnapshot, LocalOrder, Market, Side, SymbolSpec } fro
 
 const MAX_RL_RETRIES = 5;
 const RECV_WINDOW_MS = 30_000; // long-running bot: generous clock-skew tolerance (guard caps at 60s)
+// 무타임아웃 fetch는 BE 재시작 순단에 영구 행잉 → 봇 루프 침묵 웨지 (2026-07-14 실측).
+// 타임아웃으로 요청을 실패시켜 기존 에러 경로(로그+다음 루프)로 회복시킨다.
+const REQ_TIMEOUT_MS = 10_000;
 const rlSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 class ApiError extends Error {
@@ -33,7 +36,7 @@ interface ExchangeInfoSymbol {
   minNotional: string;
 }
 
-interface ApiKeyPair {
+export interface ApiKeyPair {
   apiKey: string;
   secret: string;
 }
@@ -74,6 +77,7 @@ export class LocalExchangeClient {
         method,
         headers,
         body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+        signal: AbortSignal.timeout(REQ_TIMEOUT_MS),
       });
       if ((res.status === 429 || res.status === 418) && retryable && attempt < MAX_RL_RETRIES) {
         const ra = Number(res.headers.get('Retry-After')) || 1;
@@ -107,6 +111,7 @@ export class LocalExchangeClient {
         method,
         headers,
         body: opts.body !== undefined ? bodyStr : undefined,
+        signal: AbortSignal.timeout(REQ_TIMEOUT_MS),
       });
       if ((res.status === 429 || res.status === 418) && retryable && attempt < MAX_RL_RETRIES) {
         const ra = Number(res.headers.get('Retry-After')) || 1;
@@ -141,13 +146,37 @@ export class LocalExchangeClient {
     if (!this.cookie) throw new Error(`${this.label}: no session cookie from ${path}`);
   }
 
-  /** create (or reuse) a trading API key via the JWT session; store the HMAC pair. */
+  /**
+   * Create a trading API key via the JWT session; store the HMAC pair. The portal mints a new
+   * key on every call, so callers should try a persisted pair first (setApiKey + keyWorks) and
+   * only fall back here — otherwise every boot grows the account's key list.
+   */
   async ensureApiKey(): Promise<void> {
     const data = await this.raw<ApiKeyPair>(config.api.portal, 'POST', '/auth/api-keys', {
       cookie: true,
       body: { label: `${this.label}-bot`, canTrade: true, canRead: true },
     });
     this.key = { apiKey: data.data.apiKey, secret: data.data.secret };
+  }
+
+  /** install a previously persisted HMAC pair (validate with keyWorks before trusting it). */
+  setApiKey(pair: ApiKeyPair): void {
+    this.key = pair;
+  }
+
+  getApiKey(): ApiKeyPair | null {
+    return this.key;
+  }
+
+  /** probe the installed key with a signed read; false on an auth rejection (revoked/unknown). */
+  async keyWorks(): Promise<boolean> {
+    try {
+      await this.balances('SPOT');
+      return true;
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 401 || e.status === 403)) return false;
+      throw e; // network/backend trouble is not a verdict on the key
+    }
   }
 
   /**
@@ -162,6 +191,7 @@ export class LocalExchangeClient {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Admin-Secret': adminSecret },
         body: JSON.stringify({ exempt: true }),
+        signal: AbortSignal.timeout(REQ_TIMEOUT_MS),
       },
     );
     await unwrap<unknown>('POST', '/admin/users/:id/rate-limit-exempt', res);
@@ -220,12 +250,27 @@ export class LocalExchangeClient {
 
   // ---- trading (TRADE scope) ----
   placeLimit(spec: SymbolSpec, side: Side, price: string, qty: string): Promise<LocalOrder> {
+    return this.placeResting(spec, 'LIMIT', side, price, qty);
+  }
+
+  /** maker-only resting order: the engine rejects it instead of matching if it would cross. */
+  placePostOnly(spec: SymbolSpec, side: Side, price: string, qty: string): Promise<LocalOrder> {
+    return this.placeResting(spec, 'POST_ONLY', side, price, qty);
+  }
+
+  private placeResting(
+    spec: SymbolSpec,
+    type: 'LIMIT' | 'POST_ONLY',
+    side: Side,
+    price: string,
+    qty: string,
+  ): Promise<LocalOrder> {
     if (spec.market === 'SPOT') {
       return this.signed<LocalOrder>(config.api.spot, 'POST', '/spot/trading/orders', {
         body: {
           tickerSymbol: spec.symbol,
           tickerMarket: 'SPOT',
-          type: 'LIMIT',
+          type,
           side,
           timeInForce: 'GTC',
           price,
@@ -234,7 +279,7 @@ export class LocalExchangeClient {
       });
     }
     return this.signed<LocalOrder>(config.api.futures, 'POST', '/futures/trading/orders', {
-      body: { symbol: spec.symbol, type: 'LIMIT', side, timeInForce: 'GTC', price, qty },
+      body: { symbol: spec.symbol, type, side, timeInForce: 'GTC', price, qty },
     });
   }
 
@@ -249,6 +294,30 @@ export class LocalExchangeClient {
     }
     return this.signed<LocalOrder>(config.api.futures, 'POST', '/futures/trading/orders', {
       body: { symbol: spec.symbol, type: 'MARKET', side, qty: baseQty },
+    });
+  }
+
+  /**
+   * Marketable-limit taker: a LIMIT IOC at `price`. Fills only what crosses at/inside `price`
+   * (bids ≥ price on a SELL, asks ≤ price on a BUY) and expires the rest — so it cannot walk the
+   * book past `price`. Used to replay source trades without a MARKET order sweeping thin depth.
+   */
+  placeLimitIoc(spec: SymbolSpec, side: Side, price: string, qty: string): Promise<LocalOrder> {
+    if (spec.market === 'SPOT') {
+      return this.signed<LocalOrder>(config.api.spot, 'POST', '/spot/trading/orders', {
+        body: {
+          tickerSymbol: spec.symbol,
+          tickerMarket: 'SPOT',
+          type: 'LIMIT',
+          side,
+          timeInForce: 'IOC',
+          price,
+          origQty: qty,
+        },
+      });
+    }
+    return this.signed<LocalOrder>(config.api.futures, 'POST', '/futures/trading/orders', {
+      body: { symbol: spec.symbol, type: 'LIMIT', side, timeInForce: 'IOC', price, qty },
     });
   }
 

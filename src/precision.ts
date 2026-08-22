@@ -20,6 +20,29 @@ export function roundPrice(spec: SymbolSpec, price: number): string {
   return toFixedStr(ticks * tick, spec.pricePrecision);
 }
 
+/** snap a price DOWN to the tick grid (1e-9 guards float noise on already-aligned prices). */
+export function floorPrice(spec: SymbolSpec, price: number): string {
+  const tick = tickAt(spec, price);
+  return toFixedStr(Math.floor(price / tick + 1e-9) * tick, spec.pricePrecision);
+}
+
+/** snap a price UP to the tick grid. */
+export function ceilPrice(spec: SymbolSpec, price: number): string {
+  const tick = tickAt(spec, price);
+  return toFixedStr(Math.ceil(price / tick - 1e-9) * tick, spec.pricePrecision);
+}
+
+/**
+ * Side-aware snap for RESTING quotes: bids floor, asks ceil. Nearest-rounding can push a bid
+ * above / an ask below the source price when the local tick is coarser than the source grid —
+ * the two sides then target a crossed book and POST_ONLY rejects punch holes in it. Rounding
+ * away from the spread can never cross. (Aggressive IOC caps want the opposite direction —
+ * use ceilPrice for a BUY cap / floorPrice for a SELL cap so the source price stays inside.)
+ */
+export function snapPrice(spec: SymbolSpec, price: number, side: 'BUY' | 'SELL'): string {
+  return side === 'BUY' ? floorPrice(spec, price) : ceilPrice(spec, price);
+}
+
 /** snap a qty DOWN to the symbol's step grid (never over-commit balance). */
 export function floorQty(spec: SymbolSpec, qty: number): string {
   const steps = Math.floor(qty / spec.stepSize + 1e-9);

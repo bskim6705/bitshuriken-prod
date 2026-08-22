@@ -1,5 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { config } from './config';
-import { LocalExchangeClient } from './exchange';
+import { LocalExchangeClient, type ApiKeyPair } from './exchange';
 import { buildFeeds } from './feeds';
 import { MakerBot } from './bots/maker';
 import { TakerBot } from './bots/taker';
@@ -8,15 +10,45 @@ import type { Feed, Market, SymbolSpec } from './types';
 
 const log = makeLogger('run');
 
-// dev mints per bot. Per-quote so KRW markets (quote=KRW) get funded too.
-const QUOTE_DEPOSIT: Record<string, string> = {
-  USDT: '100000000', // 100M
-  USDC: '100000000',
-  KRW: '100000000000', // 100B (≈ 100M USD worth)
+// dev mint TARGETS per bot account. Funding is idempotent: each boot (and the periodic refill
+// loop) reads the account's balance and tops up only the shortfall below half the target —
+// a restart no longer re-mints the full amount on top of what the account already holds.
+const QUOTE_TARGET: Record<string, number> = {
+  USDT: 100_000_000, // 100M
+  USDC: 100_000_000,
+  KRW: 100_000_000_000, // 100B (≈ 100M USD worth)
 };
-const DEFAULT_QUOTE_DEPOSIT = '100000000';
-const BASE_DEPOSIT = '100000'; // 100k of each base per bot
-const FUTURES_MARGIN = '10000000'; // 10M USDT moved to futures wallet per bot
+const DEFAULT_QUOTE_TARGET = 100_000_000;
+const BASE_TARGET_FLOOR = 100_000; // floor units of each base (cheap/unlisted bases)
+const BASE_NOTIONAL = 2_000_000; // target ~$2M worth of each base, so sub-cent alts get enough units
+const FUTURES_MARGIN = 10_000_000; // 10M USDT kept in the futures wallet of a futures account
+const REFILL_EVERY_MS = 10 * 60_000; // periodic top-up absorbs fee bleed / one-sided fills
+const BOOTSTRAP_CONCURRENCY = 4; // parallel account bootstraps (portal is single-event-loop too)
+
+// One account per (role, market, symbol) — ADR-070. Two shared accounts serialized every
+// symbol's freeze/settle/refund on a couple of hot rows and skewed latency measurements.
+const accountEmail = (role: 'maker' | 'taker', spec: SymbolSpec): string =>
+  `${role}-${spec.market === 'FUTURES' ? 'f-' : ''}${spec.symbol.toLowerCase()}@bots.local`;
+
+// Sub-cent alts (VANRY ~$0.0065) need far more than a flat 100k base to mirror one Binance ask
+// level. Fund each base to a notional target via its public Binance price; fall back to the flat
+// floor for unlisted bases / lookup failure. KRW-market bases use the USDT price too (value-approx).
+const baseTargetCache = new Map<string, number>();
+async function baseTarget(base: string): Promise<number> {
+  const cached = baseTargetCache.get(base);
+  if (cached) return cached;
+  let qty = BASE_TARGET_FLOOR;
+  try {
+    const res = await fetch(`https://api.binance.com/api/v3/ticker/bookTicker?symbol=${base}USDT`);
+    const j = (await res.json()) as { bidPrice?: string; askPrice?: string };
+    const price = (Number(j.bidPrice) + Number(j.askPrice)) / 2;
+    if (price > 0) qty = Math.max(BASE_TARGET_FLOOR, Math.ceil(BASE_NOTIONAL / price));
+  } catch {
+    /* unlisted base or network error — keep the flat floor */
+  }
+  baseTargetCache.set(base, qty);
+  return qty;
+}
 
 async function resolveWanted(client: LocalExchangeClient): Promise<SymbolSpec[]> {
   if (config.symbols.length === 0) {
@@ -44,56 +76,134 @@ async function resolveWanted(client: LocalExchangeClient): Promise<SymbolSpec[]>
     });
 }
 
-async function fund(client: LocalExchangeClient, wanted: SymbolSpec[]): Promise<void> {
-  const spot = wanted.filter((s) => s.market === 'SPOT');
-  const quotes = new Set(spot.map((s) => s.quoteAsset));
-  const bases = new Set(spot.map((s) => s.baseAsset));
-  // a base can also be a quote elsewhere (USDT is base of USDTKRW, quote of BTCUSDT) — dedup by symbol.
-  for (const q of quotes) await client.deposit(q, QUOTE_DEPOSIT[q] ?? DEFAULT_QUOTE_DEPOSIT);
-  for (const b of bases) if (!quotes.has(b)) await client.deposit(b, BASE_DEPOSIT);
-  if (wanted.some((s) => s.market === 'FUTURES')) {
-    await client.transfer('SPOT', 'FUTURES', 'USDT', FUTURES_MARGIN);
-  }
-  log.ok(`funded ${client.label}`);
+/** free+locked of one asset in a balance list. */
+function held(balances: { asset: string; free: string; locked: string }[], asset: string): number {
+  const b = balances.find((x) => x.asset === asset);
+  return b ? Number(b.free) + Number(b.locked) : 0;
 }
 
-async function bootstrap(client: LocalExchangeClient, email: string): Promise<void> {
+/**
+ * Idempotent funding for ONE account mirroring ONE symbol: top an asset up to its target only
+ * when the account holds less than half of it. Ran at boot and by the refill loop (fees bleed
+ * both accounts ~10bps per fill; trends drain one side of the maker's inventory).
+ */
+async function ensureFunded(client: LocalExchangeClient, spec: SymbolSpec): Promise<void> {
+  const spot = await client.balances('SPOT');
+  const topUp = async (asset: string, target: number): Promise<void> => {
+    const have = held(spot, asset);
+    if (have >= target / 2) return;
+    await client.deposit(asset, String(Math.ceil(target - have)));
+  };
+  const quoteAsset = spec.market === 'FUTURES' ? 'USDT' : spec.quoteAsset;
+  await topUp(quoteAsset, QUOTE_TARGET[quoteAsset] ?? DEFAULT_QUOTE_TARGET);
+  if (spec.market === 'SPOT' && spec.baseAsset !== spec.quoteAsset) {
+    await topUp(spec.baseAsset, await baseTarget(spec.baseAsset));
+  }
+  if (spec.market === 'FUTURES') {
+    const fut = await client.balances('FUTURES');
+    const have = held(fut, 'USDT');
+    if (have < FUTURES_MARGIN / 2) {
+      await client.transfer('SPOT', 'FUTURES', 'USDT', String(Math.ceil(FUTURES_MARGIN - have)));
+    }
+  }
+}
+
+// ---- persisted API keys: the portal mints a new key per request, so reuse across boots ----
+const KEY_STORE = path.join(process.cwd(), '.bot-keys.json');
+
+function loadKeyStore(): Record<string, ApiKeyPair> {
+  try {
+    return JSON.parse(fs.readFileSync(KEY_STORE, 'utf8')) as Record<string, ApiKeyPair>;
+  } catch {
+    return {};
+  }
+}
+
+function saveKeyStore(store: Record<string, ApiKeyPair>): void {
+  fs.writeFileSync(KEY_STORE, JSON.stringify(store, null, 2) + '\n', { mode: 0o600 });
+}
+
+async function bootstrap(
+  client: LocalExchangeClient,
+  email: string,
+  keyStore: Record<string, ApiKeyPair>,
+): Promise<void> {
   await client.ensureAccount(email, config.accounts.password);
-  await client.ensureApiKey();
+  const cached = keyStore[email];
+  let reused = false;
+  if (cached) {
+    client.setApiKey(cached);
+    reused = await client.keyWorks();
+  }
+  if (!reused) {
+    await client.ensureApiKey();
+    keyStore[email] = client.getApiKey()!;
+  }
   if (config.adminSecret) {
     await client.ensureRateLimitExempt(config.adminSecret);
-    log.ok(`${client.label} rate-limit exempt`);
-  } else {
-    log.warn(`${client.label}: no ADMIN_API_SECRET — not exempt (ok only while RATE_LIMIT_ENABLED=false)`);
   }
+}
+
+/** run `fn` over items with a bounded number in flight. */
+async function pooled<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  const queue = [...items];
+  const workers = Array.from({ length: Math.min(limit, queue.length) }, async () => {
+    for (let item = queue.shift(); item !== undefined; item = queue.shift()) await fn(item);
+  });
+  await Promise.all(workers);
 }
 
 async function main(): Promise<void> {
-  const maker = new LocalExchangeClient('maker');
-  const taker = new LocalExchangeClient('taker');
-  await bootstrap(maker, config.accounts.makerEmail);
-  await bootstrap(taker, config.accounts.takerEmail);
-  log.ok(`accounts ready — maker=${maker.userId} taker=${taker.userId}`);
-
-  const wanted = await resolveWanted(maker);
+  const probe = new LocalExchangeClient('probe'); // public reads only (exchange-info)
+  const wanted = await resolveWanted(probe);
   if (wanted.length === 0)
     throw new Error('nothing to mirror — exchange listed no tickers (and no *_SYMBOLS override)');
 
-  await fund(maker, wanted);
-  await fund(taker, wanted);
-
-  for (const spec of wanted.filter((s) => s.market === 'FUTURES')) {
-    await maker.setLeverage(spec.symbol, config.tuning.futuresLeverage).catch(() => {});
-    await taker.setLeverage(spec.symbol, config.tuning.futuresLeverage).catch(() => {});
+  // one maker + one taker account per spec
+  const keyStore = loadKeyStore();
+  const clients = new Map<string, { maker: LocalExchangeClient; taker: LocalExchangeClient; spec: SymbolSpec }>();
+  for (const spec of wanted) {
+    const key = `${spec.market}:${spec.symbol}`;
+    clients.set(key, {
+      maker: new LocalExchangeClient(`maker:${key}`),
+      taker: new LocalExchangeClient(`taker:${key}`),
+      spec,
+    });
   }
+  await pooled([...clients.values()], BOOTSTRAP_CONCURRENCY, async ({ maker, taker, spec }) => {
+    await bootstrap(maker, accountEmail('maker', spec), keyStore);
+    await bootstrap(taker, accountEmail('taker', spec), keyStore);
+    await ensureFunded(maker, spec);
+    await ensureFunded(taker, spec);
+    if (spec.market === 'FUTURES') {
+      for (const c of [maker, taker]) {
+        await c.setLeverage(spec.symbol, config.tuning.futuresLeverage).catch((e: unknown) => {
+          log.warn(`${c.label}: setLeverage failed — futures orders may be margin-rejected`, (e as Error).message);
+        });
+      }
+    }
+  });
+  saveKeyStore(keyStore);
+  if (!config.adminSecret) {
+    log.warn('no ADMIN_API_SECRET — accounts not rate-limit exempt (ok only while RATE_LIMIT_ENABLED=false)');
+  }
+  log.ok(`accounts ready — ${clients.size} maker/taker pairs (one per symbol)`);
 
   const makers = new Map<string, MakerBot>();
   const takers = new Map<string, TakerBot>();
-  for (const spec of wanted) {
-    const key = `${spec.market}:${spec.symbol}`;
+  for (const [key, { maker, taker, spec }] of clients) {
     makers.set(
       key,
-      new MakerBot(maker, spec, config.tuning.depthLevels, config.tuning.reconcileMs, config.tuning.futuresMaxNotional),
+      new MakerBot(
+        maker,
+        spec,
+        config.tuning.depthLevels,
+        config.tuning.reconcileMs,
+        config.tuning.futuresMaxNotional,
+        config.tuning.qtyTolerance,
+        config.tuning.resyncMs,
+        config.tuning.passOpsCap,
+      ),
     );
     takers.set(key, new TakerBot(taker, spec, config.tuning.takerMaxQtyFrac, config.tuning.takerMaxTps));
   }
@@ -111,6 +221,12 @@ async function main(): Promise<void> {
 
   for (const m of makers.values()) m.start();
   for (const t of takers.values()) t.start();
+  const refillTimer = setInterval(() => {
+    void pooled([...clients.values()], BOOTSTRAP_CONCURRENCY, async ({ maker, taker, spec }) => {
+      await ensureFunded(maker, spec).catch((e: unknown) => log.warn('refill failed', (e as Error).message));
+      await ensureFunded(taker, spec).catch((e: unknown) => log.warn('refill failed', (e as Error).message));
+    });
+  }, REFILL_EVERY_MS);
   log.ok(
     `mirroring ${wanted.length} symbols: ${wanted.map((s) => `${s.market === 'FUTURES' ? 'F:' : ''}${s.symbol}`).join(', ')}`,
   );
@@ -121,6 +237,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log.info(`${sig} — shutting down…`);
+    clearInterval(refillTimer);
     for (const f of feeds) f.stop();
     for (const t of takers.values()) t.stop();
     await Promise.allSettled([...makers.values()].map((m) => m.clear()));

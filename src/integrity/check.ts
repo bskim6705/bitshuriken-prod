@@ -2,6 +2,7 @@ import { closeDb, type CheckResult } from './db';
 import { runInvariants } from './invariants';
 import { runFutures } from './futures';
 import { liquidationOracle } from './liquidation';
+import { runDlq } from './dlq';
 import { runParity } from './parity';
 
 const C = { dim: '\x1b[90m', red: '\x1b[31m', green: '\x1b[32m', yellow: '\x1b[33m', bold: '\x1b[1m', reset: '\x1b[0m' };
@@ -17,13 +18,14 @@ function printSection(title: string, results: CheckResult[]): void {
 }
 
 async function once(): Promise<boolean> {
-  const [inv, fut, liq, par] = await Promise.all([
+  const [inv, fut, liq, dlq, par] = await Promise.all([
     runInvariants(),
     runFutures(),
     liquidationOracle().then((r) => [r]),
+    runDlq(),
     runParity(),
   ]);
-  const money = [...inv, ...fut, ...liq];
+  const money = [...inv, ...fut, ...liq, ...dlq];
   const all = [...money, ...par];
   // Only monetary invariants (F1-F4) gate the exit code. Parity is informational: a crossed local
   // book or mid drift is surfaced but never fails the run (may be stale seed/e2e leftovers).
@@ -35,6 +37,7 @@ async function once(): Promise<boolean> {
   printSection('F1/F4 SPOT LEDGER & LOCKS', inv);
   printSection('F3 FUTURES PnL & LEDGER', fut);
   printSection('F2 LIQUIDATION ORACLE', liq);
+  printSection('F5 SETTLEMENT DLQ', dlq);
   printSection('PARITY (local book vs source — informational)', par);
   const verdict = moneyFails ? `${C.red}FAIL${C.reset}` : warns || parFails ? `${C.yellow}PASS (warnings)${C.reset}` : `${C.green}PASS${C.reset}`;
   console.log(

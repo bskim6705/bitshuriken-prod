@@ -47,9 +47,11 @@ export const config = {
   // operator secret used to flag the maker/taker accounts rate-limit exempt on boot (ADR-066).
   adminSecret: process.env.ADMIN_API_SECRET ?? '',
   tuning: {
-    depthLevels: num('DEPTH_LEVELS', 20),
-    reconcileMs: num('RECONCILE_MS', 1500),
+    depthLevels: num('DEPTH_LEVELS', 50), // deep buffer: a fast move can churn the whole visible top-20
+    reconcileMs: num('RECONCILE_MS', 250), // maker pass pacing (min gap between diff passes)
+    resyncMs: num('RESYNC_MS', 5_000), // maker open-orders resync cadence (also clears PO-reject phantoms)
     qtyTolerance: num('QTY_TOLERANCE', 0.2),
+    passOpsCap: num('MAKER_PASS_OPS_CAP', 15), // max levels touched per side per maker pass (feedback-027 walk)
     takerMaxQtyFrac: num('TAKER_MAX_QTY_FRAC', 0.6),
     takerMaxTps: num('TAKER_MAX_TPS', 8),
     futuresLeverage: num('FUTURES_LEVERAGE', 10),

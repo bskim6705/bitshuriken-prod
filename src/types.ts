@@ -49,6 +49,7 @@ export interface Balance {
 export interface LocalOrder {
   id: string;
   status: string;
+  side: Side;
   price: string | null;
   origQty: string | null;
   executedQty: string;
