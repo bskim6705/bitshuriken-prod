@@ -1,0 +1,33 @@
+name: bitshuriken-bots
+
+# Mirroring liquidity bots — a SEPARATE service, NOT part of bitshuriken-prod-infra's core stack
+# (feedback-023). Deploys on its own: image built by this repo's CI (GHCR), pulled + run here.
+#
+# It attaches to the core exchange's docker network as EXTERNAL so it can reach the backend by
+# internal DNS (be-spot / be-futures / be-portal). That network (bitshuriken_internal) is created by
+# bitshuriken-prod-infra — bring the exchange up there first, then here:
+#   docker compose pull && docker compose up -d
+# On a DIFFERENT host, drop the external network and point *_API at https://bitshuriken.com/api/*.
+#
+# Symbols are discovered from the exchange at startup (exchange-info) — nothing to configure.
+# Market-making accounts are made rate-limit exempt via ADMIN_API_SECRET (= backend ADMIN_API_SECRET).
+#
+# On-demand integrity checker (the only part that needs the DB):
+#   docker compose run --rm -e DATABASE_URL=postgresql://USER:PASS@postgres:5432/bitshuriken bots npm run check
+
+services:
+  bots:
+    image: ghcr.io/bskim6705/bitshuriken-prod-bots:latest
+    restart: unless-stopped
+    environment:
+      SPOT_API: http://be-spot:5101
+      FUTURES_API: http://be-futures:5102
+      PORTAL_API: http://be-portal:5103
+      # Set to the backend's ADMIN_API_SECRET to flag the maker/taker accounts rate-limit exempt.
+      ADMIN_API_SECRET: ${ADMIN_API_SECRET:-}
+    networks: [exchange]
+
+networks:
+  exchange:
+    external: true
+    name: bitshuriken_internal
