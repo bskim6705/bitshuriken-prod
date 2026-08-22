@@ -9,6 +9,9 @@ import { TriggerRegistryService } from '../trigger/trigger-registry.service';
 import { OrderDispatchService } from '../order/order-dispatch.service';
 import { CreateOrderListDto } from './dto/create-order-list.dto';
 import { ErrorCode } from '@app/shared/constants/error-codes';
+import { JournalWriter } from '@app/core-domain/ledger/journal-writer';
+import { LedgerService } from '@app/core-domain/ledger/ledger.service';
+import { LedgerAvailability } from '@app/core-domain/ledger/ledger-availability';
 import { OrderListService } from './order-list.service';
 import { OcoStateMachine } from './oco-state-machine';
 
@@ -331,7 +334,7 @@ class FakePrisma {
   }
 }
 
-function makeService(db: FakePrisma, opts: { lastPrice?: string | null } = {}) {
+function makeService(db: FakePrisma, opts: { lastPrice?: string | null; truth?: boolean } = {}) {
   const lastPrice = opts.lastPrice === undefined ? '50000' : opts.lastPrice;
   const tickerStats = {
     metaOf: jest.fn().mockReturnValue(META),
@@ -351,6 +354,24 @@ function makeService(db: FakePrisma, opts: { lastPrice?: string | null } = {}) {
     dispatchCancelOrder: jest.fn().mockResolvedValue(undefined),
   };
   const users = { assertCanTrade: jest.fn().mockResolvedValue(undefined) };
+  // S0 원장 섀도(박제): writeInTx는 toEntry가 처리 가능한 최소 row를 반환, ledger는 no-op 스텁.
+  const journal = {
+    writeInTx: jest.fn().mockResolvedValue({
+      seq: 1,
+      sourceKey: 'lock:list:test',
+      userId: USER,
+      assetSymbol: 'BTC',
+      marketType: MarketType.SPOT,
+      deltaBalance: d(0),
+      deltaLocked: d(0),
+    }),
+  };
+  // 기본은 S0(availability disabled → Wallet 경로) — 기존 박제 불변. truth:true면 진실 스위치 경로.
+  const truth = opts.truth ?? false;
+  const ledger = truth
+    ? new LedgerService([MarketType.SPOT])
+    : ({ owns: jest.fn().mockReturnValue(true), applyJournal: jest.fn() } as unknown as LedgerService);
+  const availability = { enabled: truth } as unknown as LedgerAvailability;
   const service = new OrderListService(
     db as unknown as PrismaService,
     tickerStats as unknown as TickerStatsService,
@@ -360,8 +381,11 @@ function makeService(db: FakePrisma, opts: { lastPrice?: string | null } = {}) {
     dispatch as unknown as OrderDispatchService,
     new OcoStateMachine(db as unknown as PrismaService),
     users as unknown as UserService,
+    journal as unknown as JournalWriter,
+    ledger,
+    availability,
   );
-  return { service, tickerStats, userStream, settlement, registry, dispatch, users };
+  return { service, tickerStats, userStream, settlement, registry, dispatch, users, ledger };
 }
 
 type Harness = ReturnType<typeof makeService>;

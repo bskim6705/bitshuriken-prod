@@ -1,5 +1,6 @@
 import { Injectable, HttpStatus } from '@nestjs/common';
 import {
+  BalanceJournalKind,
   FundingTxType,
   FuturesIncomeType,
   MarketType,
@@ -13,6 +14,7 @@ import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { PrismaService } from '@app/infra/prisma/prisma.service';
 import { ApiKeyService } from '@app/core-domain/api-key/api-key.service';
+import { JournalWriter, SourceKey } from '@app/core-domain/ledger/journal-writer';
 import { TwoFactorService } from '@app/core-domain/two-factor/two-factor.service';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
@@ -46,6 +48,7 @@ export class SubaccountService {
     private prisma: PrismaService,
     private apiKeyService: ApiKeyService,
     private twoFactor: TwoFactorService,
+    private journal: JournalWriter,
   ) {}
 
   /** 서브계정 생성. 마스터의 수수료율을 상속. 합성 email + 사용 불가 password(로그인 차단). */
@@ -226,6 +229,28 @@ export class SubaccountService {
           ],
         });
       }
+
+      // 저널 미러 (S0 섀도): 양 leg를 out.id로 짝지어 1건씩 (같은 market, 다른 user). Wallet 델타와 동일.
+      await this.journal.writeManyInTx(tx, [
+        {
+          userId: dto.fromAccountId,
+          assetSymbol: dto.assetSymbol,
+          marketType: market,
+          kind: BalanceJournalKind.TRANSFER,
+          deltaBalance: qty.neg(),
+          deltaLocked: new Decimal(0),
+          sourceKey: SourceKey.transferOut(out.id),
+        },
+        {
+          userId: dto.toAccountId,
+          assetSymbol: dto.assetSymbol,
+          marketType: market,
+          kind: BalanceJournalKind.TRANSFER,
+          deltaBalance: qty,
+          deltaLocked: new Decimal(0),
+          sourceKey: SourceKey.transferIn(out.id),
+        },
+      ]);
 
       return out;
     });

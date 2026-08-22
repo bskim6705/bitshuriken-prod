@@ -9,6 +9,7 @@ import { AdminMarketController } from './admin-market.controller';
 import { AdminMarketService } from './admin-market.service';
 import { AdminOpsController } from './admin-ops.controller';
 
+// JournalWriter는 @Global PortalLedgerModule이 제공 (append 전용 배선).
 @Module({
   imports: [PrismaModule, KafkaModule, AuthModule, TwoFactorModule],
   controllers: [AdminController, AdminMarketController, AdminOpsController],

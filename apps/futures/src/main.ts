@@ -5,6 +5,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { FuturesAppModule } from './futures-app.module';
 import { applyGlobalPipeline } from '@app/shared/bootstrap/apply-global-pipeline';
 import { FUTURES_API_DESCRIPTION } from '@app/shared/docs/api-description';
+import { matchPartitionCount } from '@app/shared/partition';
 
 async function bootstrap() {
   const port = process.env.PORT_FUTURES;
@@ -26,6 +27,11 @@ async function bootstrap() {
       },
       consumer: {
         groupId: 'bitshuriken-be-futures',
+      },
+      // 심볼→파티션 고정이라 파티션 간 공유 행 없음(Position/Order/Trade 쓰기는 모두 심볼 단위,
+      // 포지션 적용은 별도 정산 worker) → 파티션 병렬 소비로 직렬(=1) 소비 상한 해제.
+      run: {
+        partitionsConsumedConcurrently: matchPartitionCount('FUTURES'),
       },
     },
   });

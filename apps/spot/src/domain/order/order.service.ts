@@ -1,7 +1,13 @@
 import { Injectable, HttpStatus } from '@nestjs/common';
-import { MarketType, Order, OrderStatus } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
+import { BalanceJournalKind, MarketType, Order, OrderStatus, Prisma, Wallet } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '@app/infra/prisma/prisma.service';
+import { JournalWriter, SourceKey } from '@app/core-domain/ledger/journal-writer';
+import { LedgerService } from '@app/core-domain/ledger/ledger.service';
+import { LedgerAvailability } from '@app/core-domain/ledger/ledger-availability';
+import { LEDGER_TRUTH } from '@app/core-domain/ledger/ledger-truth';
+import { toEntry } from '@app/core-domain/ledger/journal-tailer';
 import { TickerStatsService } from '@app/core-domain/ticker/ticker-stats.service';
 import { UserService } from '@app/core-domain/user/user.service';
 import { UserStreamService } from '../user-stream/user-stream.service';
@@ -17,7 +23,10 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
 import { createOrderOrThrowDuplicate, generateClientOrderId } from '@app/shared/order-client-id';
-import { MAX_OPEN_ORDERS_PER_SYMBOL } from '@app/shared/constants/trading-protection';
+import {
+  MAX_OPEN_ORDERS_PER_SYMBOL,
+  MM_MAX_OPEN_ORDERS_PER_SYMBOL,
+} from '@app/shared/constants/trading-protection';
 
 const OPEN_STATUSES: OrderStatus[] = ['NEW', 'OPEN', 'PARTIAL'];
 const TERMINAL_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
@@ -30,9 +39,19 @@ const TERMINAL_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
 const ZERO = new Decimal(0);
 const MAX_HISTORY_LIMIT = 500;
 
+// place tx 안에서 조건부 차감이 0건일 때 롤백 유발용 sentinel. tx 밖에서 원인(지갑부재 vs 잔고부족)을 판별.
+class DebitFailedError extends Error {}
+
 export interface ReplaceOrderResult {
   order: Order;
   replaced: { orderId: string; cancelRequested: true };
+}
+
+interface AccountPosition {
+  asset: string;
+  free: string;
+  locked: string;
+  ts: number;
 }
 
 @Injectable()
@@ -46,7 +65,15 @@ export class OrderService {
     private orderLists: OrderListService,
     private dispatch: OrderDispatchService,
     private users: UserService,
+    private journal: JournalWriter,
+    private ledger: LedgerService,
+    private availability: LedgerAvailability,
   ) {}
+
+  /** S2 진실 경로 판정: 스위치 ON + 저널 가용(테이블 부재면 S0 행 경로로 안전 강등). */
+  private useTruth(): boolean {
+    return LEDGER_TRUTH && this.availability.enabled;
+  }
 
   // ---------- write ----------
 
@@ -233,56 +260,63 @@ export class OrderService {
     const lock = lockFor({ type: dto.type, side: dto.side, price, origQty, origQuoteQty, meta });
     const clientOrderId = dto.newClientOrderId ?? generateClientOrderId();
 
-    const created = await createOrderOrThrowDuplicate(() =>
-      this.prisma.$transaction(async (tx) => {
-        const wallet = await tx.wallet.findUnique({
-          where: {
-            userId_assetSymbol_marketType: {
-              userId,
-              assetSymbol: lock.assetSymbol,
-              marketType: dto.tickerMarket,
-            },
-          },
-        });
-        if (!wallet) {
-          throw new DomainException(
-            ErrorCode.WALLET_NOT_FOUND,
-            `Wallet not found for ${lock.assetSymbol}`,
-          );
-        }
+    const amount = lock.amount.toFixed();
+    const { order, accountPosition } = this.useTruth()
+      ? await this.placeWithLedger(userId, dto, lock, clientOrderId, price, stopPrice, origQty, origQuoteQty)
+      : await this.placeWithWallet(userId, dto, lock, clientOrderId, price, stopPrice, origQty, origQuoteQty, amount);
 
-        // 원자적 조건부 차감 — check-then-update는 동시 주문에서 초과 인출 가능
-        const debit = await tx.wallet.updateMany({
-          where: {
-            userId,
-            assetSymbol: lock.assetSymbol,
-            marketType: dto.tickerMarket,
-            balance: { gte: lock.amount },
-          },
+    // stop 계열은 엔진 미전송 — 트리거까지 BE 보관
+    if (isStopType(dto.type)) {
+      this.registry.add(order);
+    }
+
+    this.userStream.emitAccountPosition(userId, [accountPosition]);
+    this.userStream.emitExecutionReport(
+      userId,
+      buildExecutionReport(order, meta, {
+        executedQty: ZERO,
+        cumulativeQuoteQty: ZERO,
+        status: 'NEW',
+        ts: order.createdAt.getTime(),
+      }),
+    );
+
+    if (!isStopType(dto.type)) {
+      await this.dispatch.dispatchNewOrder(order);
+    }
+    return order;
+  }
+
+  /**
+   * S2 진실 경로: 동결을 ledger.reserve()(동기 체크+홀드)로 선행 → 성공 시 tx = Order INSERT + 저널
+   * INSERT만(Wallet 행 UPDATE 없음 — 락 컨보이 소멸) → tx 실패 시 rollbackReserve. reserve가 곧 잔고
+   * 판정이라 부족 시 INSUFFICIENT_BALANCE. outboundAccountPosition은 reserve 직후 원장 스냅샷에서 소싱.
+   */
+  private async placeWithLedger(
+    userId: string,
+    dto: CreateOrderDto,
+    lock: { assetSymbol: string; amount: Decimal },
+    clientOrderId: string,
+    price: Decimal | null,
+    stopPrice: Decimal | null,
+    origQty: Decimal | null,
+    origQuoteQty: Decimal | null,
+  ): Promise<{ order: Order; accountPosition: AccountPosition }> {
+    const parts = { userId, assetSymbol: lock.assetSymbol, marketType: dto.tickerMarket };
+    const orderId = randomUUID();
+    const sourceKey = SourceKey.spotPlaceLock(orderId);
+    // 동기 체크+홀드 — check와 hold 사이 yield 없음 → 동시 접수 초과 인출 불가.
+    if (!this.ledger.reserve(parts, lock.amount, sourceKey)) {
+      throw new DomainException(ErrorCode.INSUFFICIENT_BALANCE, 'Insufficient balance');
+    }
+    let order: Order;
+    try {
+      order = await createOrderOrThrowDuplicate(async () => {
+        // 2개 INSERT뿐 — 인터랙티브 tx(AsyncLocalStorage 오버헤드) 대신 batch $transaction([...]).
+        // orderId를 미리 생성했으므로 저널이 주문 id를 결과에서 받을 필요 없음(둘 다 pre-gen 참조).
+        const orderOp = this.prisma.order.create({
           data: {
-            balance: { decrement: lock.amount },
-            locked: { increment: lock.amount },
-          },
-        });
-        if (debit.count === 0) {
-          throw new DomainException(ErrorCode.INSUFFICIENT_BALANCE, 'Insufficient balance');
-        }
-
-        const updatedWallet = await tx.wallet.findUnique({
-          where: {
-            userId_assetSymbol_marketType: {
-              userId,
-              assetSymbol: lock.assetSymbol,
-              marketType: dto.tickerMarket,
-            },
-          },
-        });
-        if (!updatedWallet) {
-          throw new Error(`wallet row vanished after debit (${userId}/${lock.assetSymbol})`);
-        }
-
-        const order = await tx.order.create({
-          data: {
+            id: orderId,
             userId,
             clientOrderId,
             tickerSymbol: dto.tickerSymbol,
@@ -297,38 +331,143 @@ export class OrderService {
             status: 'NEW',
           },
         });
+        const journalOp = this.journal.createInBatch({
+          userId,
+          assetSymbol: lock.assetSymbol,
+          marketType: dto.tickerMarket,
+          kind: BalanceJournalKind.SPOT_PLACE_LOCK,
+          deltaBalance: lock.amount.neg(),
+          deltaLocked: lock.amount,
+          sourceKey,
+          meta: { orderId, clientOrderId },
+        });
+        // 강등 시 journalOp=null → 주문만 원자 커밋 (writeInTx null 시맨틱과 동일).
+        const ops: Prisma.PrismaPromise<unknown>[] = [orderOp];
+        if (journalOp) ops.push(journalOp);
+        const [created] = await this.prisma.$transaction(ops);
+        return created as Order;
+      });
+    } catch (e) {
+      this.ledger.rollbackReserve(parts, lock.amount, sourceKey);
+      throw e;
+    }
+    // reserve 직후 원장 스냅샷 (tx 밖, 진실 값). ts는 주문 생성 시각.
+    const snap = this.ledger.getDecimal(parts);
+    return {
+      order,
+      accountPosition: {
+        asset: lock.assetSymbol,
+        free: snap.balance.toFixed(8),
+        locked: snap.locked.toFixed(8),
+        ts: order.createdAt.getTime(),
+      },
+    };
+  }
 
-        return { order, wallet: updatedWallet };
-      }),
-    );
+  /**
+   * S0 경로 (LEDGER_TRUTH=false 또는 저널 강등): order.create 먼저(실패 시 롤백 소멸) → 원자적 조건부
+   * 차감+RETURNING 한 방. 차감 0건은 sentinel로 롤백 후 tx 밖에서 원인(지갑부재 vs 잔고부족)만 별도 조회로 판별.
+   */
+  private async placeWithWallet(
+    userId: string,
+    dto: CreateOrderDto,
+    lock: { assetSymbol: string; amount: Decimal },
+    clientOrderId: string,
+    price: Decimal | null,
+    stopPrice: Decimal | null,
+    origQty: Decimal | null,
+    origQuoteQty: Decimal | null,
+    amount: string,
+  ): Promise<{ order: Order; accountPosition: AccountPosition }> {
+    const created = await createOrderOrThrowDuplicate(async () => {
+      try {
+        return await this.prisma.$transaction(async (tx) => {
+          const order = await tx.order.create({
+            data: {
+              userId,
+              clientOrderId,
+              tickerSymbol: dto.tickerSymbol,
+              tickerMarket: dto.tickerMarket,
+              type: dto.type,
+              side: dto.side,
+              timeInForce: dto.timeInForce,
+              price,
+              stopPrice,
+              origQty,
+              origQuoteQty,
+              status: 'NEW',
+            },
+          });
 
-    // stop 계열은 엔진 미전송 — 트리거까지 BE 보관
-    if (isStopType(dto.type)) {
-      this.registry.add(created.order);
+          // 원자적 조건부 차감 — check-then-update는 동시 주문에서 초과 인출 가능.
+          // updatedAt는 raw가 @updatedAt를 건너뛰므로 NOW()로 직접 갱신(유저스트림 ts 보존).
+          const debited = await tx.$queryRaw<Wallet[]>`
+            UPDATE "Wallet"
+               SET "balance" = "balance" - ${amount}::numeric,
+                   "locked" = "locked" + ${amount}::numeric,
+                   "updatedAt" = NOW()
+             WHERE "userId" = ${userId}
+               AND "assetSymbol" = ${lock.assetSymbol}
+               AND "marketType" = ${dto.tickerMarket}::"MarketType"
+               AND "balance" >= ${amount}::numeric
+            RETURNING *`;
+          if (debited.length === 0) {
+            throw new DebitFailedError();
+          }
+
+          // S0 원장 섀도: 동결을 wallet 변이와 동일 델타로 저널에 병행 기록 (Order INSERT와 원자 결합).
+          const journalRow = await this.journal.writeInTx(tx, {
+            userId,
+            assetSymbol: lock.assetSymbol,
+            marketType: dto.tickerMarket,
+            kind: BalanceJournalKind.SPOT_PLACE_LOCK,
+            deltaBalance: lock.amount.neg(),
+            deltaLocked: lock.amount,
+            sourceKey: SourceKey.spotPlaceLock(order.id),
+            meta: { orderId: order.id, clientOrderId },
+          });
+
+          return { order, wallet: debited[0], journalRow };
+        });
+      } catch (e) {
+        if (e instanceof DebitFailedError) {
+          // 롤백됨(order.create 소멸). 원인 판별만 tx 밖 단발 조회로.
+          const w = await this.prisma.wallet.findUnique({
+            where: {
+              userId_assetSymbol_marketType: {
+                userId,
+                assetSymbol: lock.assetSymbol,
+                marketType: dto.tickerMarket,
+              },
+            },
+          });
+          if (!w) {
+            throw new DomainException(
+              ErrorCode.WALLET_NOT_FOUND,
+              `Wallet not found for ${lock.assetSymbol}`,
+            );
+          }
+          throw new DomainException(ErrorCode.INSUFFICIENT_BALANCE, 'Insufficient balance');
+        }
+        throw e;
+      }
+    });
+
+    // 커밋 후 자기 마켓 엔트리 즉시 로컬 반영 (멱등 — tailer 재수신은 sourceKey로 no-op).
+    // journalRow null = 원장 강등(LedgerAvailability disabled) → 저널 미기록이므로 로컬 반영도 skip.
+    if (created.journalRow && this.ledger.owns(dto.tickerMarket)) {
+      this.ledger.applyJournal(toEntry(created.journalRow));
     }
 
-    this.userStream.emitAccountPosition(userId, [
-      {
+    return {
+      order: created.order,
+      accountPosition: {
         asset: created.wallet.assetSymbol,
         free: created.wallet.balance.toFixed(8),
         locked: created.wallet.locked.toFixed(8),
         ts: created.wallet.updatedAt.getTime(),
       },
-    ]);
-    this.userStream.emitExecutionReport(
-      userId,
-      buildExecutionReport(created.order, meta, {
-        executedQty: ZERO,
-        cumulativeQuoteQty: ZERO,
-        status: 'NEW',
-        ts: created.order.createdAt.getTime(),
-      }),
-    );
-
-    if (!isStopType(dto.type)) {
-      await this.dispatch.dispatchNewOrder(created.order);
-    }
-    return created.order;
+    };
   }
 
   // ---------- cancel ----------
@@ -414,12 +553,25 @@ export class OrderService {
         ...(excludeOrderId ? { id: { not: excludeOrderId } } : {}),
       },
     });
-    if (count >= MAX_OPEN_ORDERS_PER_SYMBOL) {
+    if (count < MAX_OPEN_ORDERS_PER_SYMBOL) return;
+    // 일반 상한 도달 시에만 유저 조회 — 시장조성 계정(rateLimitExempt)은 상향 캡 (ADR-068)
+    const cap = (await this.isMarketMaker(userId))
+      ? MM_MAX_OPEN_ORDERS_PER_SYMBOL
+      : MAX_OPEN_ORDERS_PER_SYMBOL;
+    if (count >= cap) {
       throw new DomainException(
         ErrorCode.MAX_NUM_ORDERS_EXCEEDED,
-        `Open-order limit reached for ${symbol} (max ${MAX_OPEN_ORDERS_PER_SYMBOL})`,
+        `Open-order limit reached for ${symbol} (max ${cap})`,
       );
     }
+  }
+
+  private async isMarketMaker(userId: string): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { rateLimitExempt: true },
+    });
+    return user?.rateLimitExempt ?? false;
   }
 
   private async lastPriceOf(market: MarketType, symbol: string): Promise<Decimal | null> {

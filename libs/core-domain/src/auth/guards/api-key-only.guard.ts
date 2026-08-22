@@ -2,7 +2,7 @@ import { CanActivate, ExecutionContext, Injectable, HttpStatus } from '@nestjs/c
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { ApiKeyService } from '../../api-key/api-key.service';
-import { PrismaService } from '@app/infra/prisma/prisma.service';
+import { UserService } from '../../user/user.service';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
 import { ApiScope, API_SCOPE_KEY } from '@app/shared/decorators/api-scope.decorator';
@@ -27,7 +27,7 @@ const MAX_RECV_WINDOW_MS = 60_000;
 export class ApiKeyOnlyGuard implements CanActivate {
   constructor(
     private readonly apiKeyService: ApiKeyService,
-    private readonly prisma: PrismaService,
+    private readonly users: UserService,
     private readonly reflector: Reflector,
   ) {}
 
@@ -121,11 +121,8 @@ export class ApiKeyOnlyGuard implements CanActivate {
       );
     }
 
-    // req.user 통일
-    const user = await this.prisma.user.findUnique({
-      where: { id: record.userId },
-      select: { id: true, email: true, role: true, rateLimitExempt: true },
-    });
+    // req.user 통일 — authContextOf 캐시 채움 → 같은 요청 order 경로 assertCanTrade 재조회 0.
+    const user = await this.users.authContextOf(record.userId);
     if (!user)
       throw new DomainException(
         ErrorCode.USER_NOT_FOUND,

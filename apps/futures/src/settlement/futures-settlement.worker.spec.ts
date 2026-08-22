@@ -1,6 +1,9 @@
+import { MarketType } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '@app/infra/prisma/prisma.service';
 import { KafkaService } from '@app/infra/messaging/kafka.service';
+import { JournalWriter } from '@app/core-domain/ledger/journal-writer';
+import { LedgerService } from '@app/core-domain/ledger/ledger.service';
 import { FuturesConfigService } from '../config/futures-config.service';
 import { MarkPriceService } from '../mark-price/mark-price.service';
 import { FuturesUserEventsService } from '../user-events/futures-user-events.service';
@@ -222,6 +225,19 @@ class FakePrisma {
     },
   };
 
+  // ADR-069 S0: 저널 append-only 테이블 fake — sourceKey @unique 미러(중복 거부).
+  journals: { sourceKey: string }[] = [];
+  balanceJournal = {
+    create: (args: { data: { sourceKey: string } & Record<string, unknown> }) => {
+      if (this.journals.some((j) => j.sourceKey === args.data.sourceKey)) {
+        return Promise.reject(new Error(`duplicate journal sourceKey ${args.data.sourceKey}`));
+      }
+      const row = { id: `bj-${++this.seq}`, seq: this.seq, createdAt: new Date(), ...args.data };
+      this.journals.push(row as never);
+      return Promise.resolve(row);
+    },
+  };
+
   ticker = {
     findUnique: () => Promise.resolve({ partition: 0 }),
   };
@@ -393,7 +409,7 @@ class FakePrisma {
   }
 }
 
-function makeWorker(db: FakePrisma) {
+function makeWorker(db: FakePrisma, opts: { truth?: boolean } = {}) {
   const kafka = { emit: jest.fn().mockResolvedValue(undefined) };
   const config = {
     configOf: jest.fn().mockResolvedValue({ liquidationFeeRate: d('0.005'), mmr: d('0.005') }),
@@ -402,6 +418,15 @@ function makeWorker(db: FakePrisma) {
   const userEvents = new FuturesUserEventsService();
   // mark 미형성 — positionUpdate 파생값(mark/UPNL/청산가)은 null로 남김(기존 자산/포지션 assertion 불변)
   const markPrice = { tryGetMark: jest.fn(() => null) };
+  // 실 JournalWriter/LedgerService 주입 — writeInTx는 db.balanceJournal fake로, applyJournal은 인메모리.
+  // availability는 enabled 스텁(테이블 존재 = 정상). LedgerAvailability 프로브 경로는 F 소유라 미모킹.
+  const availability = { enabled: true };
+  const journalWriter = new JournalWriter(db as unknown as PrismaService, availability as never);
+  const ledger = new LedgerService([MarketType.FUTURES]);
+  // 기존 박제는 S0(Wallet 행 회계) 검증 — 워커 availability는 disabled로 진실 스위치 OFF 고정.
+  // (journalWriter는 enabled라 저널·원장 섀도 반영은 계속 일어나 ledger assertion도 유효.)
+  // opts.truth=true면 워커도 진실 스위치 ON.
+  const workerAvailability = { enabled: opts.truth ?? false };
   const worker = new FuturesSettlementWorker(
     db as unknown as PrismaService,
     kafka as unknown as KafkaService,
@@ -409,8 +434,11 @@ function makeWorker(db: FakePrisma) {
     fund as unknown as InsuranceFundService,
     userEvents,
     markPrice as unknown as MarkPriceService,
+    journalWriter,
+    ledger,
+    workerAvailability as never,
   );
-  return { worker, kafka, userEvents };
+  return { worker, kafka, userEvents, ledger, db };
 }
 
 describe('FuturesSettlementWorker', () => {

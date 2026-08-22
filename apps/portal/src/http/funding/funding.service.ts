@@ -1,7 +1,8 @@
 import { Injectable, HttpStatus } from '@nestjs/common';
-import { FundingTxType, MarketType } from '@prisma/client';
+import { BalanceJournalKind, FundingTxType, MarketType } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '@app/infra/prisma/prisma.service';
+import { JournalWriter, SourceKey } from '@app/core-domain/ledger/journal-writer';
 import { FundingDto } from './dto/funding.dto';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
@@ -16,6 +17,7 @@ export class FundingService {
   constructor(
     private prisma: PrismaService,
     private twoFactor: TwoFactorService,
+    private journal: JournalWriter,
   ) {}
 
   async deposit(userId: string, dto: FundingDto) {
@@ -40,7 +42,7 @@ export class FundingService {
         },
         update: { balance: { increment: qty } },
       });
-      return tx.fundingTx.create({
+      const fundingTx = await tx.fundingTx.create({
         data: {
           userId,
           type: FundingTxType.DEPOSIT,
@@ -49,6 +51,17 @@ export class FundingService {
           toMarket: MarketType.SPOT,
         },
       });
+      // 저널 미러 (S0 섀도) — Wallet 가산과 동일 델타.
+      await this.journal.writeInTx(tx, {
+        userId,
+        assetSymbol: dto.assetSymbol,
+        marketType: MarketType.SPOT,
+        kind: BalanceJournalKind.DEPOSIT,
+        deltaBalance: qty,
+        deltaLocked: new Decimal(0),
+        sourceKey: SourceKey.deposit(fundingTx.id),
+      });
+      return fundingTx;
     });
 
     return {
@@ -77,7 +90,7 @@ export class FundingService {
       if (debit.count === 0) {
         throw new DomainException(ErrorCode.INSUFFICIENT_BALANCE, 'Insufficient balance');
       }
-      return tx.fundingTx.create({
+      const fundingTx = await tx.fundingTx.create({
         data: {
           userId,
           type: FundingTxType.WITHDRAWAL,
@@ -86,6 +99,17 @@ export class FundingService {
           fromMarket: MarketType.SPOT,
         },
       });
+      // 저널 미러 (S0 섀도) — Wallet 차감과 동일 델타.
+      await this.journal.writeInTx(tx, {
+        userId,
+        assetSymbol: dto.assetSymbol,
+        marketType: MarketType.SPOT,
+        kind: BalanceJournalKind.WITHDRAWAL,
+        deltaBalance: qty.neg(),
+        deltaLocked: new Decimal(0),
+        sourceKey: SourceKey.withdrawal(fundingTx.id),
+      });
+      return fundingTx;
     });
 
     return {

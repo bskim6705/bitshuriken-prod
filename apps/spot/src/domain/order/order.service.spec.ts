@@ -10,6 +10,9 @@ import { OrderListService } from '../order-list/order-list.service';
 import { OrderDispatchService } from './order-dispatch.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { ErrorCode } from '@app/shared/constants/error-codes';
+import { JournalWriter } from '@app/core-domain/ledger/journal-writer';
+import { LedgerService } from '@app/core-domain/ledger/ledger.service';
+import { LedgerAvailability } from '@app/core-domain/ledger/ledger-availability';
 import { OrderService } from './order.service';
 
 // OrderService 박제 테스트 — 잠금 자산/금액, 조건부 차감, 취소/환불 경계의 현재 동작을 고정한다.
@@ -118,16 +121,27 @@ function updateMany(rows: Iterable<Row>, where: Row, data: Row): { count: number
   return { count };
 }
 
+// 실제 Prisma PrismaPromise 모사: 부수효과를 await(=then) 시점까지 지연. batch $transaction([...])이
+// 커밋 전 스냅샷에서 롤백하도록(= 지연 실행). memoize로 다중 await 시 1회만 실행.
+function lazyOp<T>(run: () => T): Promise<T> {
+  let p: Promise<T> | undefined;
+  const exec = () => (p ??= (async () => run())());
+  return {
+    then: (f?: unknown, r?: unknown) => exec().then(f as never, r as never),
+  } as unknown as Promise<T>;
+}
+
 class FakePrisma {
   orders = new Map<string, OrderRow>();
   wallets = new Map<string, WalletRow>(); // `${userId}:${asset}:${market}`
   private seq = 0;
 
   order = {
-    create: (args: { data: Row }) => {
-      const row = this.makeOrder(args.data as Partial<OrderRow> & { userId: string });
-      return Promise.resolve({ ...row });
-    },
+    create: (args: { data: Row }) =>
+      lazyOp(() => {
+        const row = this.makeOrder(args.data as Partial<OrderRow> & { userId: string });
+        return { ...row };
+      }),
     findUnique: (args: { where: { id: string } }) => {
       const row = this.orders.get(args.where.id);
       return Promise.resolve(row ? { ...row } : null);
@@ -178,9 +192,49 @@ class FakePrisma {
     findFirst: () => Promise.resolve(null),
   };
 
-  // 박제 대상 경로는 차감 실패 시 선행 mutation이 없어 롤백 에뮬레이션 불필요
-  $transaction<T>(fn: (tx: this) => Promise<T>): Promise<T> {
-    return fn(this);
+  // isMarketMaker(order cap)용 최소 스텁 — 기본은 비-MM(rateLimitExempt=false).
+  user = {
+    findUnique: () => Promise.resolve({ rateLimitExempt: false }),
+  };
+
+  // place tx의 원자적 조건부 차감(raw UPDATE ... RETURNING). 태그드 템플릿 인자 순서에 결합:
+  // values = [amt, amt, userId, asset, market, amt] (order.service.ts의 쿼리와 동일 순서).
+  $queryRaw(strings: TemplateStringsArray, ...values: unknown[]): Promise<unknown[]> {
+    const sql = strings.join('');
+    if (sql.includes('UPDATE "Wallet"')) {
+      const amt = d(values[0] as string);
+      const userId = values[2] as string;
+      const asset = values[3] as string;
+      const market = values[4] as MarketType;
+      const row = this.wallets.get(`${userId}:${asset}:${market}`);
+      if (!row || row.balance.lt(amt)) return Promise.resolve([]);
+      row.balance = row.balance.sub(amt);
+      row.locked = row.locked.add(amt);
+      row.updatedAt = new Date();
+      return Promise.resolve([{ ...row }]);
+    }
+    return Promise.resolve([]);
+  }
+
+  // 실패 시 롤백 에뮬레이션 (Map 스냅샷 복원). 인터랙티브(fn) + batch(배열) 두 형태 지원 —
+  // 배열 형태는 lazy op를 순서대로 await(=커밋 순서), 스냅샷은 첫 await 전에 캡처.
+  async $transaction<T>(
+    arg: ((tx: this) => Promise<T>) | Array<Promise<unknown>>,
+  ): Promise<T | unknown[]> {
+    const ordersBackup = new Map(this.orders);
+    const walletsBackup = new Map([...this.wallets].map(([k, v]) => [k, { ...v }]));
+    try {
+      if (Array.isArray(arg)) {
+        const results: unknown[] = [];
+        for (const op of arg) results.push(await op);
+        return results;
+      }
+      return await arg(this);
+    } catch (e) {
+      this.orders = ordersBackup;
+      this.wallets = walletsBackup;
+      throw e;
+    }
   }
 
   // ---- seed helpers ----
@@ -227,7 +281,10 @@ class FakePrisma {
   }
 }
 
-function makeService(db: FakePrisma, opts: { lastPrice?: string | null } = {}) {
+function makeService(
+  db: FakePrisma,
+  opts: { lastPrice?: string | null; truth?: boolean; journalThrows?: boolean } = {},
+) {
   const lastPrice = opts.lastPrice === undefined ? '50000' : opts.lastPrice;
   const tickerStats = {
     metaOf: jest.fn().mockReturnValue(META),
@@ -247,6 +304,36 @@ function makeService(db: FakePrisma, opts: { lastPrice?: string | null } = {}) {
     dispatchCancelOrder: jest.fn().mockResolvedValue(undefined),
   };
   const users = { assertCanTrade: jest.fn().mockResolvedValue(undefined) };
+  // S0 원장 섀도(박제): writeInTx는 toEntry가 처리 가능한 최소 row를 반환, ledger는 no-op 스텁.
+  // createInBatch(S2 batch place)는 lazy op 반환 — $transaction 배열에 합류(강등 아니면 non-null).
+  const journalRow = {
+    seq: 1,
+    sourceKey: 'lock:test',
+    userId: USER,
+    assetSymbol: 'BTC',
+    marketType: MarketType.SPOT,
+    deltaBalance: d(0),
+    deltaLocked: d(0),
+  };
+  const journal = {
+    writeInTx: opts.journalThrows
+      ? jest.fn().mockRejectedValue(new Error('journal write failed'))
+      : jest.fn().mockResolvedValue(journalRow),
+    createInBatch: opts.journalThrows
+      ? jest.fn().mockImplementation(() =>
+          lazyOp(() => {
+            throw new Error('journal write failed');
+          }),
+        )
+      : jest.fn().mockImplementation(() => lazyOp(() => ({ ...journalRow }))),
+  };
+  // 기본은 S0(availability disabled → LEDGER_TRUTH 무관하게 Wallet 경로) — 기존 박제 불변.
+  // truth:true면 진실 스위치 경로: 실 LedgerService + availability enabled.
+  const truth = opts.truth ?? false;
+  const ledger = truth
+    ? new LedgerService([MarketType.SPOT])
+    : ({ owns: jest.fn().mockReturnValue(true), applyJournal: jest.fn() } as unknown as LedgerService);
+  const availability = { enabled: truth } as unknown as LedgerAvailability;
   const service = new OrderService(
     db as unknown as PrismaService,
     tickerStats as unknown as TickerStatsService,
@@ -256,8 +343,11 @@ function makeService(db: FakePrisma, opts: { lastPrice?: string | null } = {}) {
     orderLists as unknown as OrderListService,
     dispatch as unknown as OrderDispatchService,
     users as unknown as UserService,
+    journal as unknown as JournalWriter,
+    ledger,
+    availability,
   );
-  return { service, tickerStats, userStream, settlement, registry, orderLists, dispatch, users };
+  return { service, tickerStats, userStream, settlement, registry, orderLists, dispatch, users, ledger, journal };
 }
 
 type Harness = ReturnType<typeof makeService>;
@@ -460,6 +550,56 @@ describe('OrderService (박제)', () => {
       h.service.submitNewOrder(USER, dto({ price: '50000', origQty: '0.0001' })),
     ).rejects.toMatchObject({ code: ErrorCode.MIN_NOTIONAL_NOT_MET });
     expect(wallet(db, 'USDT').locked.toFixed()).toBe('0');
+  });
+
+  // ---------- 슬림 place tx (order.create 먼저 → 원자적 조건부 차감 RETURNING) ----------
+
+  it('슬림 tx 성공: 조건부 차감 후 정확한 잔고/락, emit ts=갱신된 wallet.updatedAt', async () => {
+    const db = new FakePrisma();
+    db.seedWallet(USER, 'USDT', 10000);
+    const h = makeService(db);
+    const before = Date.now() - 1;
+
+    const order = (await h.service.submitNewOrder(
+      USER,
+      dto({ price: '50000', origQty: '0.1' }),
+    )) as Order;
+
+    const w = wallet(db, 'USDT');
+    expect(w.balance.toFixed()).toBe('5000');
+    expect(w.locked.toFixed()).toBe('5000');
+    expect(db.orders.get(order.id)!.status).toBe('NEW'); // 주문 영속
+    // raw UPDATE가 updatedAt=NOW()로 갱신 → emit ts가 stale이 아님
+    const emit = h.userStream.emitAccountPosition.mock.calls[0] as [string, Array<{ ts: number }>];
+    expect(emit[1][0].ts).toBeGreaterThanOrEqual(before);
+  });
+
+  it('슬림 tx 차감 실패(잔고부족): order.create가 먼저 실행돼도 롤백 — 주문 미영속 + INSUFFICIENT_BALANCE', async () => {
+    const db = new FakePrisma();
+    db.seedWallet(USER, 'USDT', 4999);
+    const h = makeService(db);
+
+    await expect(
+      h.service.submitNewOrder(USER, dto({ price: '50000', origQty: '0.1' })),
+    ).rejects.toMatchObject({ code: ErrorCode.INSUFFICIENT_BALANCE });
+
+    expect(db.orders.size).toBe(0); // tx 롤백으로 선행 order.create 소멸
+    expect(wallet(db, 'USDT').balance.toFixed()).toBe('4999');
+    expect(wallet(db, 'USDT').locked.toFixed()).toBe('0');
+    expect(h.userStream.emitAccountPosition).not.toHaveBeenCalled();
+  });
+
+  it('슬림 tx 지갑 부재: 차감 0건 → tx 밖 조회로 WALLET_NOT_FOUND 판별, 주문 미영속', async () => {
+    const db = new FakePrisma();
+    const h = makeService(db); // 지갑 시드 없음
+
+    await expect(
+      h.service.submitNewOrder(USER, dto({ price: '50000', origQty: '0.1' })),
+    ).rejects.toMatchObject({
+      code: ErrorCode.WALLET_NOT_FOUND,
+      message: 'Wallet not found for USDT',
+    });
+    expect(db.orders.size).toBe(0);
   });
 
   // ---------- price band (PERCENT_PRICE ±10%) ----------
@@ -906,5 +1046,71 @@ describe('OrderService (박제)', () => {
     expect(h.settlement.recordDustRefund).toHaveBeenCalledTimes(1);
     expect(h.dispatch.dispatchCancelOrder).not.toHaveBeenCalled();
     expect(h.dispatch.dispatchNewOrder).toHaveBeenCalledTimes(1);
+  });
+
+  // ---------- ADR-069 S2 진실 스위치 (LEDGER_TRUTH + availability) ----------
+
+  describe('LEDGER_TRUTH 경로 (원장이 진실, Wallet 행 UPDATE 없음)', () => {
+    const ledgerKey = { userId: USER, assetSymbol: 'USDT', marketType: MarketType.SPOT };
+    const seedLedger = (h: Harness, scaled: bigint) =>
+      (h as unknown as { ledger: LedgerService }).ledger.apply(ledgerKey, scaled, 0n);
+
+    it('성공: reserve가 balance→locked 홀드, Wallet 행 무변동, accountPosition은 원장 스냅샷', async () => {
+      const db = new FakePrisma();
+      db.seedWallet(USER, 'USDT', 10000); // 프로젝션 행(진실 아님) — worker가 안 건드림 검증용
+      const h = makeService(db, { truth: true });
+      seedLedger(h, 10000_00000000n); // 원장 진실 = 10000
+
+      const order = (await h.service.submitNewOrder(
+        USER,
+        dto({ price: '50000', origQty: '0.1' }),
+      )) as Order;
+
+      expect(order.status).toBe('NEW');
+      // Wallet 행은 hot-path에서 손대지 않음 (프로젝터 소관) — 시드값 그대로
+      const w = wallet(db, 'USDT');
+      expect(w.balance.toFixed()).toBe('10000');
+      expect(w.locked.toFixed()).toBe('0');
+      // 원장은 홀드 반영: 10000 → 5000 free / 5000 locked
+      const led = (h as unknown as { ledger: LedgerService }).ledger.getScaled(ledgerKey);
+      expect(led).toEqual({ balance: 5000_00000000n, locked: 5000_00000000n });
+      expect(h.userStream.emitAccountPosition).toHaveBeenCalledWith(USER, [
+        expect.objectContaining({ asset: 'USDT', free: '5000.00000000', locked: '5000.00000000' }),
+      ]);
+      expect(h.dispatch.dispatchNewOrder).toHaveBeenCalledTimes(1);
+      // batch place tx 경로: 인터랙티브 writeInTx가 아닌 createInBatch로 저널 op 합류
+      expect(h.journal.createInBatch).toHaveBeenCalledTimes(1);
+      expect(h.journal.writeInTx).not.toHaveBeenCalled();
+    });
+
+    it('잔고 부족: reserve false → INSUFFICIENT_BALANCE, 원장/주문 무변동', async () => {
+      const db = new FakePrisma();
+      const h = makeService(db, { truth: true });
+      seedLedger(h, 4999_00000000n); // lock 5000 필요
+
+      await expect(
+        h.service.submitNewOrder(USER, dto({ price: '50000', origQty: '0.1' })),
+      ).rejects.toMatchObject({ code: ErrorCode.INSUFFICIENT_BALANCE });
+
+      const led = (h as unknown as { ledger: LedgerService }).ledger.getScaled(ledgerKey);
+      expect(led).toEqual({ balance: 4999_00000000n, locked: 0n });
+      expect(db.orders.size).toBe(0);
+      expect(h.dispatch.dispatchNewOrder).not.toHaveBeenCalled();
+    });
+
+    it('tx 실패: rollbackReserve로 홀드 원복 (저널 커밋 실패)', async () => {
+      const db = new FakePrisma();
+      const h = makeService(db, { truth: true, journalThrows: true });
+      seedLedger(h, 10000_00000000n);
+
+      await expect(
+        h.service.submitNewOrder(USER, dto({ price: '50000', origQty: '0.1' })),
+      ).rejects.toThrow();
+
+      // reserve가 잡았다가 rollbackReserve로 되돌려 balance 원복, locked 0
+      const led = (h as unknown as { ledger: LedgerService }).ledger.getScaled(ledgerKey);
+      expect(led).toEqual({ balance: 10000_00000000n, locked: 0n });
+      expect(db.orders.size).toBe(0); // tx 롤백으로 order 소멸
+    });
   });
 });

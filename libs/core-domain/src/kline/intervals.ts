@@ -1,5 +1,6 @@
 /** Kline 인터벌 단일 소스. exchange-info와 kline 계산이 공유한다. */
 export const KLINE_INTERVALS = [
+  '1s',
   '1m',
   '3m',
   '5m',
@@ -19,12 +20,14 @@ export const KLINE_INTERVALS = [
 
 export type KlineInterval = (typeof KLINE_INTERVALS)[number];
 
+const SECOND_MS = 1_000;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
 
 /** 고정폭 인터벌의 ms. 1M은 달력(월) 기준이라 제외 — bucket 헬퍼가 특별 처리. */
 export const INTERVAL_MS: Record<Exclude<KlineInterval, '1M'>, number> = {
+  '1s': SECOND_MS,
   '1m': MINUTE_MS,
   '3m': 3 * MINUTE_MS,
   '5m': 5 * MINUTE_MS,

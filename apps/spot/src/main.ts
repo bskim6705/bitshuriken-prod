@@ -5,6 +5,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { applyGlobalPipeline } from '@app/shared/bootstrap/apply-global-pipeline';
 import { SPOT_API_DESCRIPTION } from '@app/shared/docs/api-description';
+import { matchPartitionCount } from '@app/shared/partition';
 
 async function bootstrap() {
   const port = process.env.PORT_SPOT;
@@ -26,6 +27,10 @@ async function bootstrap() {
       },
       consumer: {
         groupId: 'bitshuriken-be-spot',
+      },
+      // 파티션 간 병렬 소비(파티션 내부는 여전히 직렬). 심볼→파티션 고정이라 심볼 내 순서 보존.
+      run: {
+        partitionsConsumedConcurrently: matchPartitionCount('SPOT'),
       },
     },
   });

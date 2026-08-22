@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import {
+  BalanceJournalKind,
   FundingTxType,
   FuturesIncomeType,
   MarketType,
@@ -10,6 +11,7 @@ import {
 } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '@app/infra/prisma/prisma.service';
+import { JournalWriter, SourceKey } from '@app/core-domain/ledger/journal-writer';
 import { CreateTransferDto } from './dto/create-transfer.dto';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
@@ -24,7 +26,10 @@ const FUTURES_KINDS: SettlementKind[] = [
 
 @Injectable()
 export class TransfersService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private journal: JournalWriter,
+  ) {}
 
   async transfer(userId: string, dto: CreateTransferDto) {
     if (dto.fromMarket === dto.toMarket) {
@@ -102,6 +107,28 @@ export class TransfersService {
           },
         });
       }
+
+      // 저널 미러 (S0 섀도): 양 leg를 각 마켓으로 1건씩 — 소유 앱 tailer가 각자 적용. Wallet 델타와 동일.
+      await this.journal.writeManyInTx(tx, [
+        {
+          userId,
+          assetSymbol: dto.assetSymbol,
+          marketType: dto.fromMarket,
+          kind: BalanceJournalKind.TRANSFER,
+          deltaBalance: qty.neg(),
+          deltaLocked: new Decimal(0),
+          sourceKey: SourceKey.transferOut(fundingTx.id),
+        },
+        {
+          userId,
+          assetSymbol: dto.assetSymbol,
+          marketType: dto.toMarket,
+          kind: BalanceJournalKind.TRANSFER,
+          deltaBalance: qty,
+          deltaLocked: new Decimal(0),
+          sourceKey: SourceKey.transferIn(fundingTx.id),
+        },
+      ]);
 
       return fundingTx;
     });

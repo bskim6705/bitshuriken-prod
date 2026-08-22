@@ -1,4 +1,5 @@
 import { PrismaService } from '@app/infra/prisma/prisma.service';
+import { JournalWriter } from '@app/core-domain/ledger/journal-writer';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
 import { TwoFactorService } from '@app/core-domain/two-factor/two-factor.service';
@@ -9,6 +10,13 @@ const twoFactor = {
   assertForUser: jest.fn(),
   assertSatisfied: jest.fn(() => Promise.resolve()),
 } as unknown as TwoFactorService;
+
+function makeJournal() {
+  return {
+    writeInTx: jest.fn(() => Promise.resolve({ seq: 1 })),
+    writeManyInTx: jest.fn(() => Promise.resolve([])),
+  } as unknown as JournalWriter;
+}
 
 function makeDb(over: { assetExists?: boolean; debitCount?: number } = {}) {
   const client = {
@@ -44,7 +52,7 @@ describe('FundingService', () => {
   describe('deposit', () => {
     it('SPOT 지갑에 즉시 가산하고 8자리 qty를 반환한다', async () => {
       const { prisma, raw } = makeDb();
-      const service = new FundingService(prisma, twoFactor);
+      const service = new FundingService(prisma, twoFactor, makeJournal());
       const res = await service.deposit('A', dto);
       expect(raw.wallet.upsert).toHaveBeenCalledTimes(1);
       const arg = raw.wallet.upsert.mock.calls[0][0] as {
@@ -57,17 +65,31 @@ describe('FundingService', () => {
 
     it('존재하지 않는 asset이면 거부한다', async () => {
       const { prisma } = makeDb({ assetExists: false });
-      const service = new FundingService(prisma, twoFactor);
+      const service = new FundingService(prisma, twoFactor, makeJournal());
       await expect(service.deposit('A', { ...dto, assetSymbol: 'NOPE' })).rejects.toMatchObject({
         code: ErrorCode.INVALID_PARAMETER,
       });
+    });
+
+    it('S0: DEPOSIT 저널을 SPOT +qty로 기록한다 (Wallet 가산과 동일)', async () => {
+      const { prisma } = makeDb();
+      const journal = makeJournal();
+      const service = new FundingService(prisma, twoFactor, journal);
+      await service.deposit('A', dto);
+      expect(journal.writeInTx).toHaveBeenCalledTimes(1);
+      const entry = (journal.writeInTx as jest.Mock).mock.calls[0][1];
+      expect(entry.kind).toBe('DEPOSIT');
+      expect(entry.marketType).toBe('SPOT');
+      expect(entry.deltaBalance.toString()).toBe('100');
+      expect(entry.deltaLocked.toString()).toBe('0');
+      expect(entry.sourceKey).toBe('deposit:ftx_1');
     });
   });
 
   describe('withdraw', () => {
     it('잔고 조건부 차감이 성공하면 8자리 qty를 반환한다', async () => {
       const { prisma, raw } = makeDb();
-      const service = new FundingService(prisma, twoFactor);
+      const service = new FundingService(prisma, twoFactor, makeJournal());
       const res = await service.withdraw('A', dto);
       const arg = raw.wallet.updateMany.mock.calls[0][0] as {
         where: { marketType: string; balance: { gte: unknown } };
@@ -79,17 +101,30 @@ describe('FundingService', () => {
 
     it('잔고 부족(차감 0건)이면 INSUFFICIENT_BALANCE', async () => {
       const { prisma } = makeDb({ debitCount: 0 });
-      const service = new FundingService(prisma, twoFactor);
+      const service = new FundingService(prisma, twoFactor, makeJournal());
       await expect(service.withdraw('A', dto)).rejects.toMatchObject({
         code: ErrorCode.INSUFFICIENT_BALANCE,
       });
+    });
+
+    it('S0: WITHDRAWAL 저널을 SPOT −qty로 기록한다 (Wallet 차감과 동일)', async () => {
+      const { prisma } = makeDb();
+      const journal = makeJournal();
+      const service = new FundingService(prisma, twoFactor, journal);
+      await service.withdraw('A', dto);
+      expect(journal.writeInTx).toHaveBeenCalledTimes(1);
+      const entry = (journal.writeInTx as jest.Mock).mock.calls[0][1];
+      expect(entry.kind).toBe('WITHDRAWAL');
+      expect(entry.marketType).toBe('SPOT');
+      expect(entry.deltaBalance.toString()).toBe('-100');
+      expect(entry.sourceKey).toBe('withdraw:ftx_1');
     });
   });
 
   describe('qty 검증', () => {
     it.each(['0', '-1', '0.000000001'])('qty=%s 거부', async (qty) => {
       const { prisma } = makeDb();
-      const service = new FundingService(prisma, twoFactor);
+      const service = new FundingService(prisma, twoFactor, makeJournal());
       await expect(service.deposit('A', { ...dto, qty })).rejects.toBeInstanceOf(DomainException);
       await expect(service.withdraw('A', { ...dto, qty })).rejects.toBeInstanceOf(DomainException);
     });

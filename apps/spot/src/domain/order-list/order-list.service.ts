@@ -1,7 +1,13 @@
 import { Injectable, Logger, HttpStatus } from '@nestjs/common';
-import { MarketType, Order, OrderList, OrderStatus } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
+import { BalanceJournalKind, MarketType, Order, OrderList, OrderStatus } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '@app/infra/prisma/prisma.service';
+import { JournalWriter, SourceKey } from '@app/core-domain/ledger/journal-writer';
+import { LedgerService } from '@app/core-domain/ledger/ledger.service';
+import { LedgerAvailability } from '@app/core-domain/ledger/ledger-availability';
+import { LEDGER_TRUTH } from '@app/core-domain/ledger/ledger-truth';
+import { toEntry } from '@app/core-domain/ledger/journal-tailer';
 import { TickerStatsService } from '@app/core-domain/ticker/ticker-stats.service';
 import { UserService } from '@app/core-domain/user/user.service';
 import { UserStreamService } from '../user-stream/user-stream.service';
@@ -15,7 +21,10 @@ import { OcoStateMachine, TERMINAL_STATUSES, decideLegTerminal } from './oco-sta
 import { LegFinalValues, resolveFinalization } from './oco-refund';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
-import { MAX_OPEN_ORDERS_PER_SYMBOL } from '@app/shared/constants/trading-protection';
+import {
+  MAX_OPEN_ORDERS_PER_SYMBOL,
+  MM_MAX_OPEN_ORDERS_PER_SYMBOL,
+} from '@app/shared/constants/trading-protection';
 
 const OPEN_STATUSES: OrderStatus[] = ['NEW', 'OPEN', 'PARTIAL'];
 
@@ -23,6 +32,13 @@ const ZERO = new Decimal(0);
 const MAX_LIST_QUERY_LIMIT = 500;
 
 type ListWithOrders = OrderList & { orders: Order[] };
+
+interface OcoCreateResult {
+  list: OrderList;
+  limitLeg: Order;
+  stopLeg: Order;
+  accountPosition: { asset: string; free: string; locked: string; ts: number };
+}
 
 /**
  * OCO 주문 리스트 orchestration. 전이 판정/실행은 oco-state-machine, 환불 산정은 oco-refund.
@@ -45,7 +61,15 @@ export class OrderListService {
     private dispatch: OrderDispatchService,
     private machine: OcoStateMachine,
     private users: UserService,
+    private journal: JournalWriter,
+    private ledger: LedgerService,
+    private availability: LedgerAvailability,
   ) {}
+
+  /** S2 진실 경로 판정: 스위치 ON + 저널 가용(테이블 부재면 S0 행 경로로 안전 강등). */
+  private useTruth(): boolean {
+    return LEDGER_TRUTH && this.availability.enabled;
+  }
 
   // ---------- placement ----------
 
@@ -73,10 +97,18 @@ export class OrderListService {
       },
     });
     if (openCount + 2 > MAX_OPEN_ORDERS_PER_SYMBOL) {
-      throw new DomainException(
-        ErrorCode.MAX_NUM_ORDERS_EXCEEDED,
-        `Open-order limit reached for ${dto.tickerSymbol} (max ${MAX_OPEN_ORDERS_PER_SYMBOL})`,
-      );
+      // 일반 상한 도달 시에만 유저 조회 — 시장조성 계정(rateLimitExempt)은 상향 캡 (ADR-068)
+      const mm = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { rateLimitExempt: true },
+      });
+      const cap = mm?.rateLimitExempt ? MM_MAX_OPEN_ORDERS_PER_SYMBOL : MAX_OPEN_ORDERS_PER_SYMBOL;
+      if (openCount + 2 > cap) {
+        throw new DomainException(
+          ErrorCode.MAX_NUM_ORDERS_EXCEEDED,
+          `Open-order limit reached for ${dto.tickerSymbol} (max ${cap})`,
+        );
+      }
     }
 
     const qty = new Decimal(dto.qty);
@@ -139,6 +171,136 @@ export class OrderListService {
     const lockAssetSymbol = dto.side === 'SELL' ? meta.baseAsset : meta.quoteAsset;
     const lockAmount = dto.side === 'SELL' ? qty : Decimal.max(price, stopLimitPrice).mul(qty);
 
+    const created = this.useTruth()
+      ? await this.createOcoWithLedger(userId, dto, lockAssetSymbol, lockAmount, qty, price, stopPrice, stopLimitPrice)
+      : await this.createOcoWithWallet(userId, dto, lockAssetSymbol, lockAmount, qty, price, stopPrice, stopLimitPrice);
+
+    this.userStream.emitAccountPosition(userId, [created.accountPosition]);
+    this.reportLocal(created.limitLeg, 'NEW');
+    this.reportLocal(created.stopLeg, 'NEW');
+    this.userStream.emitListStatus(userId, {
+      orderListId: created.list.id,
+      symbol: created.list.tickerSymbol,
+      status: 'EXECUTING',
+      orders: [
+        { orderId: created.limitLeg.id, status: created.limitLeg.status },
+        { orderId: created.stopLeg.id, status: created.stopLeg.status },
+      ],
+      ts: Date.now(),
+    });
+
+    await this.dispatch.dispatchNewOrder(created.limitLeg);
+
+    // stop 레그 트리거 활성화는 limit NO 전송 후 — 그 전에 트리거되면 엔진이 모르는 주문에 CO가 나간다
+    this.registry.add(created.stopLeg);
+
+    return { orderList: created.list, orders: [created.limitLeg, created.stopLeg] };
+  }
+
+  /**
+   * S2 진실 경로: 리스트 단위 동결을 ledger.reserve()로 선행 → 성공 시 tx = OrderList/leg INSERT +
+   * 저널 INSERT만(Wallet 행 UPDATE 없음) → tx 실패 시 rollbackReserve. accountPosition은 원장 스냅샷.
+   */
+  private async createOcoWithLedger(
+    userId: string,
+    dto: CreateOrderListDto,
+    lockAssetSymbol: string,
+    lockAmount: Decimal,
+    qty: Decimal,
+    price: Decimal,
+    stopPrice: Decimal,
+    stopLimitPrice: Decimal,
+  ): Promise<OcoCreateResult> {
+    const parts = { userId, assetSymbol: lockAssetSymbol, marketType: dto.tickerMarket };
+    const listId = randomUUID();
+    const sourceKey = SourceKey.spotOcoLock(listId);
+    if (!this.ledger.reserve(parts, lockAmount, sourceKey)) {
+      throw new DomainException(ErrorCode.INSUFFICIENT_BALANCE, 'Insufficient balance');
+    }
+    try {
+      const { list, limitLeg, stopLeg } = await this.prisma.$transaction(async (tx) => {
+        const list = await tx.orderList.create({
+          data: {
+            id: listId,
+            userId,
+            tickerSymbol: dto.tickerSymbol,
+            tickerMarket: dto.tickerMarket,
+            side: dto.side,
+            contingencyType: 'OCO',
+            lockAssetSymbol,
+            lockAmount,
+          },
+        });
+        const limitLeg = await tx.order.create({
+          data: {
+            userId,
+            tickerSymbol: dto.tickerSymbol,
+            tickerMarket: dto.tickerMarket,
+            type: 'LIMIT',
+            side: dto.side,
+            timeInForce: 'GTC',
+            price,
+            origQty: qty,
+            orderListId: list.id,
+            status: 'NEW',
+          },
+        });
+        const stopLeg = await tx.order.create({
+          data: {
+            userId,
+            tickerSymbol: dto.tickerSymbol,
+            tickerMarket: dto.tickerMarket,
+            type: 'STOP_LOSS_LIMIT',
+            side: dto.side,
+            timeInForce: dto.stopLimitTimeInForce,
+            price: stopLimitPrice,
+            stopPrice,
+            origQty: qty,
+            orderListId: list.id,
+            status: 'NEW',
+          },
+        });
+        await this.journal.writeInTx(tx, {
+          userId,
+          assetSymbol: lockAssetSymbol,
+          marketType: dto.tickerMarket,
+          kind: BalanceJournalKind.SPOT_PLACE_LOCK,
+          deltaBalance: lockAmount.neg(),
+          deltaLocked: lockAmount,
+          sourceKey,
+          meta: { listId: list.id, limitLegId: limitLeg.id, stopLegId: stopLeg.id },
+        });
+        return { list, limitLeg, stopLeg };
+      });
+      const snap = this.ledger.getDecimal(parts);
+      return {
+        list,
+        limitLeg,
+        stopLeg,
+        accountPosition: {
+          asset: lockAssetSymbol,
+          free: snap.balance.toFixed(8),
+          locked: snap.locked.toFixed(8),
+          ts: list.createdAt.getTime(),
+        },
+      };
+    } catch (e) {
+      this.ledger.rollbackReserve(parts, lockAmount, sourceKey);
+      throw e;
+    }
+  }
+
+  /** S0 경로: findUnique → 원자적 조건부 차감(updateMany) → OrderList/leg INSERT + 병행 저널. */
+  private async createOcoWithWallet(
+    userId: string,
+    dto: CreateOrderListDto,
+    lockAssetSymbol: string,
+    lockAmount: Decimal,
+    qty: Decimal,
+    price: Decimal,
+    stopPrice: Decimal,
+    stopLimitPrice: Decimal,
+  ): Promise<OcoCreateResult> {
     const created = await this.prisma.$transaction(async (tx) => {
       const wallet = await tx.wallet.findUnique({
         where: {
@@ -227,36 +389,37 @@ export class OrderListService {
         },
       });
 
-      return { list, limitLeg, stopLeg, wallet: updatedWallet };
+      // S0 원장 섀도: 리스트 단위 동결을 wallet 변이와 동일 델타로 저널에 병행 기록 (동일 tx).
+      const journalRow = await this.journal.writeInTx(tx, {
+        userId,
+        assetSymbol: lockAssetSymbol,
+        marketType: dto.tickerMarket,
+        kind: BalanceJournalKind.SPOT_PLACE_LOCK,
+        deltaBalance: lockAmount.neg(),
+        deltaLocked: lockAmount,
+        sourceKey: SourceKey.spotOcoLock(list.id),
+        meta: { listId: list.id, limitLegId: limitLeg.id, stopLegId: stopLeg.id },
+      });
+
+      return { list, limitLeg, stopLeg, wallet: updatedWallet, journalRow };
     });
 
-    this.userStream.emitAccountPosition(userId, [
-      {
+    // 커밋 후 자기 마켓 엔트리 즉시 로컬 반영 (멱등 — tailer 재수신은 sourceKey로 no-op).
+    if (created.journalRow && this.ledger.owns(dto.tickerMarket)) {
+      this.ledger.applyJournal(toEntry(created.journalRow));
+    }
+
+    return {
+      list: created.list,
+      limitLeg: created.limitLeg,
+      stopLeg: created.stopLeg,
+      accountPosition: {
         asset: created.wallet.assetSymbol,
         free: created.wallet.balance.toFixed(8),
         locked: created.wallet.locked.toFixed(8),
         ts: created.wallet.updatedAt.getTime(),
       },
-    ]);
-    this.reportLocal(created.limitLeg, 'NEW');
-    this.reportLocal(created.stopLeg, 'NEW');
-    this.userStream.emitListStatus(userId, {
-      orderListId: created.list.id,
-      symbol: created.list.tickerSymbol,
-      status: 'EXECUTING',
-      orders: [
-        { orderId: created.limitLeg.id, status: created.limitLeg.status },
-        { orderId: created.stopLeg.id, status: created.stopLeg.status },
-      ],
-      ts: Date.now(),
-    });
-
-    await this.dispatch.dispatchNewOrder(created.limitLeg);
-
-    // stop 레그 트리거 활성화는 limit NO 전송 후 — 그 전에 트리거되면 엔진이 모르는 주문에 CO가 나간다
-    this.registry.add(created.stopLeg);
-
-    return { orderList: created.list, orders: [created.limitLeg, created.stopLeg] };
+    };
   }
 
   // ---------- state machine ----------

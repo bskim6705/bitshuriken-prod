@@ -36,6 +36,16 @@ describe('FuturesTradingService.updatePosition — marginDelta', () => {
       },
     };
     const prisma = { $transaction: (fn: (t: typeof tx) => Promise<void>) => fn(tx) };
+    // ADR-069 S0: marginDelta 경로가 wallet leg를 저널링 — writeInTx/ledger는 병행 기록만(순서 불변).
+    const journalRow = {
+      seq: 1,
+      sourceKey: 'marginadd:x',
+      userId: 'A',
+      assetSymbol: 'USDT',
+      marketType: 'FUTURES',
+      deltaBalance: new Decimal(0),
+      deltaLocked: new Decimal(0),
+    };
     const service = new FuturesTradingService(
       prisma as never,
       { emit: jest.fn() } as never,
@@ -45,6 +55,11 @@ describe('FuturesTradingService.updatePosition — marginDelta', () => {
       { findByUserAndSymbol: jest.fn().mockResolvedValue(position) } as never,
       { tryGetMark: jest.fn().mockReturnValue(new Decimal(50000)) } as never,
       {} as never,
+      {} as never, // triggerRegistry
+      {} as never, // userEvents
+      { writeInTx: jest.fn(() => Promise.resolve(journalRow)) } as never,
+      { applyJournal: jest.fn() } as never,
+      { enabled: false } as never, // availability disabled → S0 경로 (Wallet 행 차감)
     );
     return { service, calls };
   }
@@ -66,6 +81,8 @@ describe('FuturesTradingService.placeOrder — MAX_NUM_ORDERS', () => {
   function makeService(openCount: number) {
     const prisma = {
       order: { count: jest.fn().mockResolvedValue(openCount) },
+      // MM 상향 캡 판정(ADR-068)이 상한 도달 시 rateLimitExempt를 조회 — 비-MM 스텁.
+      user: { findUnique: jest.fn().mockResolvedValue({ rateLimitExempt: false }) },
     };
     const service = new FuturesTradingService(
       prisma as never,
@@ -76,6 +93,11 @@ describe('FuturesTradingService.placeOrder — MAX_NUM_ORDERS', () => {
       {} as never,
       {} as never,
       {} as never,
+      {} as never, // triggerRegistry
+      {} as never, // userEvents
+      { writeInTx: jest.fn() } as never, // journalWriter (이 경로는 저널 이전에 거부되어 미도달)
+      { applyJournal: jest.fn() } as never, // ledger
+      { enabled: false } as never, // availability
     );
     return { service, prisma };
   }

@@ -15,6 +15,7 @@ import { TickerModule } from '@app/core-domain/ticker/ticker.module';
 import { OrderBookModule } from '@app/core-domain/orderbook/orderbook.module';
 
 // domain (spot 소유)
+import { SpotLedgerModule } from './domain/ledger/spot-ledger.module';
 import { OrderModule } from './domain/order/order.module';
 import { TradeModule } from './domain/trade/trade.module';
 import { SettlementModule } from './domain/settlement/settlement.module';
@@ -42,6 +43,7 @@ import { TickerControlModule } from './consumer/ticker-control.module';
     TickerModule,
     OrderBookModule,
     // spot
+    SpotLedgerModule,
     OrderModule,
     TradeModule,
     SettlementModule,

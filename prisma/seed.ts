@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PrismaClient, MarketType, AssetType, UserRole } from '@prisma/client';
+import { PrismaClient, MarketType, AssetType, UserRole, FundingTxType } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
@@ -72,6 +72,10 @@ const ASSET_META: Record<string, { name: string; type: AssetType; precision: num
   PUMP: { name: 'Pump.fun', type: 'CRYPTO', precision: 8 },
   NIGHT: { name: 'Midnight', type: 'CRYPTO', precision: 8 },
   DASH: { name: 'Dash', type: 'CRYPTO', precision: 8 },
+  OPN: { name: 'OPN', type: 'CRYPTO', precision: 8 },
+  MUB: { name: 'MUB', type: 'CRYPTO', precision: 8 },
+  ALLO: { name: 'ALLO', type: 'CRYPTO', precision: 8 },
+  SNDKB: { name: 'SNDKB', type: 'CRYPTO', precision: 8 },
   USDT: { name: 'Tether', type: 'STABLECOIN', precision: 6 },
   USDC: { name: 'USD Coin', type: 'STABLECOIN', precision: 6 },
   KRW: { name: 'South Korean Won', type: 'FIAT', precision: 0 }, // Upbit quote (ADR-066)
@@ -233,7 +237,7 @@ async function main(): Promise<void> {
   // 기본 dev admin은 비번도 password123으로 확정(예측 가능). 커스텀 ADMIN_EMAIL(실계정)이면 role만 승격.
   const adminEmail = process.env.ADMIN_EMAIL ?? 'admin@test.com';
   const isDefaultAdmin = !process.env.ADMIN_EMAIL || process.env.ADMIN_EMAIL === 'admin@test.com';
-  await prisma.user.upsert({
+  const adminUser = await prisma.user.upsert({
     where: { email: adminEmail },
     update: { role: UserRole.ADMIN, ...(isDefaultAdmin ? { hashedPassword } : {}) },
     create: { email: adminEmail, hashedPassword, role: UserRole.ADMIN },
@@ -254,6 +258,10 @@ async function main(): Promise<void> {
     }
   }
 
+  // 실거래소 기준: 모든 잔고 크레딧에는 원장 행이 있어야 한다. 시드가 지갑을 직접 크레딧하면
+  // 원장 없는 잔고가 생겨 F1b 대사가 깨진다. 초기 지급을 ADJUSTMENT 원장으로 기록해 대사를 맞춘다.
+  // reason 마커로 멱등 — 재시드/기존 시드 DB에도 정확히 1회만 보강.
+  const SEED_FUNDING_REASON = 'dev seed initial balance';
   for (const w of wallets) {
     await prisma.wallet.upsert({
       where: {
@@ -266,6 +274,26 @@ async function main(): Promise<void> {
       update: {},
       create: w,
     });
+    const seeded = await prisma.fundingTx.findFirst({
+      where: {
+        userId: w.userId,
+        assetSymbol: w.assetSymbol,
+        type: FundingTxType.ADJUSTMENT,
+        reason: SEED_FUNDING_REASON,
+      },
+    });
+    if (!seeded) {
+      await prisma.fundingTx.create({
+        data: {
+          userId: w.userId,
+          type: FundingTxType.ADJUSTMENT,
+          assetSymbol: w.assetSymbol,
+          qty: w.balance,
+          toMarket: w.marketType,
+          reason: SEED_FUNDING_REASON,
+        },
+      });
+    }
   }
 
   // 5. Futures — ticker precision 검증(ticker row는 위 2번 루프에서 생성됨) + FuturesConfig

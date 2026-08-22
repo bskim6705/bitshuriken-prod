@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { RateLimitModule } from '@app/shared/rate-limit/rate-limit.module';
+import { PortalLedgerModule } from './ledger/portal-ledger.module';
 import { AuthHttpModule } from './http/auth/auth.module';
 import { TransfersModule } from './http/transfers/transfers.module';
 import { SubaccountModule } from './http/subaccount/subaccount.module';
@@ -13,6 +14,7 @@ import { AdminModule } from './http/admin/admin.module';
 @Module({
   imports: [
     RateLimitModule.forApp('portal'),
+    PortalLedgerModule,
     AuthHttpModule,
     TransfersModule,
     SubaccountModule,

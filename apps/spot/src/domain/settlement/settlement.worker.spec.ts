@@ -1,4 +1,7 @@
 import { PrismaService } from '@app/infra/prisma/prisma.service';
+import { JournalWriter } from '@app/core-domain/ledger/journal-writer';
+import { LedgerService } from '@app/core-domain/ledger/ledger.service';
+import { LedgerAvailability } from '@app/core-domain/ledger/ledger-availability';
 import { UserStreamService } from '../user-stream/user-stream.service';
 import { SettlementWorker } from './settlement.worker';
 
@@ -34,7 +37,16 @@ function makeEvent(legs: Array<{ lockedDelta: string; balanceDelta: string }>) {
 }
 
 function makeWorker(prisma: PrismaService) {
-  return new SettlementWorker(prisma, {} as UserStreamService);
+  // S0 원장 섀도(박제): writeManyInTx는 no-op(빈 rows), ledger는 no-op 스텁.
+  const journal = { writeManyInTx: jest.fn().mockResolvedValue([]) };
+  const ledger = { owns: jest.fn().mockReturnValue(true), applyJournal: jest.fn() };
+  return new SettlementWorker(
+    prisma,
+    {} as UserStreamService,
+    journal as unknown as JournalWriter,
+    ledger as unknown as LedgerService,
+    { enabled: false } as unknown as LedgerAvailability, // S0 경로 (Wallet 행이 진실)
+  );
 }
 
 describe('SettlementWorker — leg 적용', () => {

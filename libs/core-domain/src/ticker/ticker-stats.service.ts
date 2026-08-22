@@ -24,6 +24,10 @@ interface State {
   tradeCount: number;
   volume: Decimal;
   quoteVolume: Decimal;
+  // 5분 가중평균용 롤링 합 (avg5mHead..end 구간). avg5mHead = 5분 윈도 시작 인덱스.
+  qtySum5m: Decimal;
+  notionalSum5m: Decimal;
+  avg5mHead: number;
 }
 
 export interface TickerMeta {
@@ -78,6 +82,9 @@ function emptyState(): State {
     tradeCount: 0,
     volume: new Decimal(0),
     quoteVolume: new Decimal(0),
+    qtySum5m: new Decimal(0),
+    notionalSum5m: new Decimal(0),
+    avg5mHead: 0,
   };
 }
 
@@ -157,10 +164,16 @@ export class TickerStatsService implements OnApplicationBootstrap {
     s.tradeCount += 1;
     s.volume = s.volume.add(entry.qty);
     s.quoteVolume = s.quoteVolume.add(entry.price.mul(entry.qty));
+    s.qtySum5m = s.qtySum5m.add(entry.qty);
+    s.notionalSum5m = s.notionalSum5m.add(entry.price.mul(entry.qty));
     s.high24h = s.high24h === null || entry.price.gt(s.high24h) ? entry.price : s.high24h;
     s.low24h = s.low24h === null || entry.price.lt(s.low24h) ? entry.price : s.low24h;
 
-    this.evict(s, Date.now());
+    // 5분 윈도를 24h shift보다 먼저 정리 — 24h로 빠질 체결(항상 5분보다 오래됨)을
+    // shift가 배열에서 제거하기 전에 5분 합에서 빼야 avg5mHead 정렬이 유지된다.
+    const now = Date.now();
+    this.evict5m(s, now);
+    this.evict(s, now);
 
     if (this.bootstrapped) this.emitter.emit('trade', event);
   }
@@ -280,24 +293,18 @@ export class TickerStatsService implements OnApplicationBootstrap {
     return result;
   }
 
-  /** 최근 5분 qty 가중평균가. 5분 내 체결 없으면 lastPrice, 그것도 없으면 null. */
+  /** 최근 5분 qty 가중평균가. 5분 내 체결 없으면 lastPrice, 그것도 없으면 null. 롤링 합으로 O(1). */
   avgPrice5m(market: MarketType, symbol: string): string | null {
     const meta = this.meta.get(keyOf(market, symbol));
     if (!meta) return null;
     const s = this.state.get(keyOf(market, symbol));
     if (!s) return null;
-    this.evict(s, Date.now());
+    const now = Date.now();
+    this.evict5m(s, now);
+    this.evict(s, now);
 
-    const cutoff = Date.now() - AVG_PRICE_WINDOW_MS;
-    let qty = new Decimal(0);
-    let notional = new Decimal(0);
-    for (let i = s.trades.length - 1; i >= 0; i--) {
-      const t = s.trades[i];
-      if (t.createdAt < cutoff) break;
-      qty = qty.add(t.qty);
-      notional = notional.add(t.price.mul(t.qty));
-    }
-    if (!qty.isZero()) return notional.div(qty).toFixed(meta.pricePrecision);
+    if (!s.qtySum5m.isZero())
+      return s.notionalSum5m.div(s.qtySum5m).toFixed(meta.pricePrecision);
     return s.lastPrice?.toFixed(meta.pricePrecision) ?? null;
   }
 
@@ -378,6 +385,8 @@ export class TickerStatsService implements OnApplicationBootstrap {
       s.tradeCount -= 1;
       s.volume = s.volume.sub(dropped.qty);
       s.quoteVolume = s.quoteVolume.sub(dropped.price.mul(dropped.qty));
+      // shift로 인덱스가 앞당겨지므로 5분 윈도 시작 인덱스도 함께 감소 (24h로 빠지는 체결은 이미 5분 밖).
+      if (s.avg5mHead > 0) s.avg5mHead -= 1;
       if (s.high24h !== null && dropped.price.eq(s.high24h)) evictedHigh = true;
       if (s.low24h !== null && dropped.price.eq(s.low24h)) evictedLow = true;
       evicted += 1;
@@ -409,6 +418,23 @@ export class TickerStatsService implements OnApplicationBootstrap {
       }
       if (evictedHigh) s.high24h = high;
       if (evictedLow) s.low24h = low;
+    }
+  }
+
+  /** 5분 윈도 롤링 합 갱신 — 윈도를 벗어난 앞쪽 체결을 빼고 avg5mHead 전진 (amortized O(1)). */
+  private evict5m(s: State, now: number): void {
+    const cutoff = now - AVG_PRICE_WINDOW_MS;
+    while (s.avg5mHead < s.trades.length && s.trades[s.avg5mHead].createdAt < cutoff) {
+      const dropped = s.trades[s.avg5mHead];
+      s.qtySum5m = s.qtySum5m.sub(dropped.qty);
+      s.notionalSum5m = s.notionalSum5m.sub(dropped.price.mul(dropped.qty));
+      s.avg5mHead += 1;
+    }
+    // 윈도 완전 소진 시 잔차 누적 방지 — 정확히 0으로 리셋 (드리프트 가드).
+    if (s.avg5mHead >= s.trades.length) {
+      s.avg5mHead = s.trades.length;
+      s.qtySum5m = new Decimal(0);
+      s.notionalSum5m = new Decimal(0);
     }
   }
 }

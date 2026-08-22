@@ -1,5 +1,8 @@
-import { Injectable, HttpStatus } from '@nestjs/common';
+import { Injectable, HttpStatus, Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import {
+  BalanceJournal,
+  BalanceJournalKind,
   MarginMode,
   MarketType,
   Order,
@@ -12,6 +15,11 @@ import {
 import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '@app/infra/prisma/prisma.service';
 import { KafkaService } from '@app/infra/messaging/kafka.service';
+import { JournalWriter, SourceKey } from '@app/core-domain/ledger/journal-writer';
+import { LedgerService } from '@app/core-domain/ledger/ledger.service';
+import { LedgerAvailability } from '@app/core-domain/ledger/ledger-availability';
+import { LEDGER_TRUTH } from '@app/core-domain/ledger/ledger-truth';
+import { toEntry } from '@app/core-domain/ledger/journal-tailer';
 import { inboundTopic } from '@app/infra/messaging/topics';
 import {
   serializeCancelOrder,
@@ -41,7 +49,10 @@ import { isStopType } from '@app/shared/order-classify';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
 import { createOrderOrThrowDuplicate, generateClientOrderId } from '@app/shared/order-client-id';
-import { MAX_OPEN_ORDERS_PER_SYMBOL } from '@app/shared/constants/trading-protection';
+import {
+  MAX_OPEN_ORDERS_PER_SYMBOL,
+  MM_MAX_OPEN_ORDERS_PER_SYMBOL,
+} from '@app/shared/constants/trading-protection';
 
 const MARKET = MarketType.FUTURES;
 const OPEN_STATUSES: OrderStatus[] = [OrderStatus.NEW, OrderStatus.OPEN, OrderStatus.PARTIAL];
@@ -58,6 +69,7 @@ const DEFAULT_LEVERAGE = 10;
 @Injectable()
 export class FuturesTradingService {
   private readonly partitions = new Map<string, number>();
+  private readonly logger = new Logger(FuturesTradingService.name);
 
   constructor(
     private prisma: PrismaService,
@@ -70,7 +82,28 @@ export class FuturesTradingService {
     private margin: MarginService,
     private triggerRegistry: FuturesTriggerRegistryService,
     private userEvents: FuturesUserEventsService,
+    private journalWriter: JournalWriter,
+    private ledger: LedgerService,
+    private availability: LedgerAvailability,
   ) {}
+
+  /** S2 진실 경로 판정: 스위치 ON + 저널 가용(테이블 부재면 S0 행 경로로 안전 강등). */
+  private useTruth(): boolean {
+    return LEDGER_TRUTH && this.availability.enabled;
+  }
+
+  /**
+   * 커밋된 저널 엔트리를 인메모리 원장에 멱등 반영 (테일러가 백스톱). 강등 시 writeInTx가 null이라
+   * no-op. 반영 실패는 삼키되 소리내어 기록(거래 경로 무영향).
+   */
+  private reflect(row: BalanceJournal | null): void {
+    if (!row) return;
+    try {
+      this.ledger.applyJournal(toEntry(row));
+    } catch (e) {
+      this.logger.error(`ledger reflect failed ${row.sourceKey}`, e as Error);
+    }
+  }
 
   // ---------- 주문 접수 ----------
 
@@ -101,10 +134,18 @@ export class FuturesTradingService {
       },
     });
     if (openCount >= MAX_OPEN_ORDERS_PER_SYMBOL) {
-      throw new DomainException(
-        ErrorCode.MAX_NUM_ORDERS_EXCEEDED,
-        `Open-order limit reached for ${dto.symbol} (max ${MAX_OPEN_ORDERS_PER_SYMBOL})`,
-      );
+      // 일반 상한 도달 시에만 유저 조회 — 시장조성 계정(rateLimitExempt)은 상향 캡 (ADR-068)
+      const mm = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { rateLimitExempt: true },
+      });
+      const cap = mm?.rateLimitExempt ? MM_MAX_OPEN_ORDERS_PER_SYMBOL : MAX_OPEN_ORDERS_PER_SYMBOL;
+      if (openCount >= cap) {
+        throw new DomainException(
+          ErrorCode.MAX_NUM_ORDERS_EXCEEDED,
+          `Open-order limit reached for ${dto.symbol} (max ${cap})`,
+        );
+      }
     }
 
     const { price, stopPrice, qty, timeInForce } = normalizeOrderFields(dto, meta);
@@ -540,32 +581,60 @@ export class FuturesTradingService {
       );
     }
 
-    if (delta.gt(0)) {
-      await this.prisma.$transaction(async (tx) => {
-        // 잠금 순서 Position→Wallet — 정산 worker와 통일 (교착 방지)
-        const updated = await tx.position.updateMany({
-          where: { userId, tickerSymbol: symbol, status: PositionStatus.NORMAL },
-          data: { isolatedMargin: { increment: delta } },
-        });
-        if (updated.count === 0) {
-          throw new DomainException(
-            ErrorCode.POSITION_LIQUIDATING,
-            'Position not found or liquidating',
-          );
-        }
+    const parts = { userId, assetSymbol: meta.quoteAsset, marketType: MARKET };
+    const useTruth = this.useTruth();
 
-        const debit = await tx.wallet.updateMany({
-          where: {
+    if (delta.gt(0)) {
+      const sourceKey = SourceKey.marginAdd(`${userId}:${symbol}:${randomUUID()}`);
+      let debited = false;
+      const journal = await this.prisma
+        .$transaction(async (tx) => {
+          // 잠금 순서 Position→Wallet — 정산 worker와 통일 (교착 방지)
+          const updated = await tx.position.updateMany({
+            where: { userId, tickerSymbol: symbol, status: PositionStatus.NORMAL },
+            data: { isolatedMargin: { increment: delta } },
+          });
+          if (updated.count === 0) {
+            throw new DomainException(
+              ErrorCode.POSITION_LIQUIDATING,
+              'Position not found or liquidating',
+            );
+          }
+
+          // wallet balance leg: S2는 원장 동기 debit(충분성 검사), S0은 조건부 행 차감.
+          if (useTruth) {
+            if (!this.ledger.debit(parts, delta, sourceKey)) {
+              throw new DomainException(ErrorCode.INSUFFICIENT_BALANCE, 'Insufficient balance');
+            }
+            debited = true;
+          } else {
+            const debit = await tx.wallet.updateMany({
+              where: { userId, assetSymbol: meta.quoteAsset, marketType: MARKET, balance: { gte: delta } },
+              data: { balance: { decrement: delta } },
+            });
+            if (debit.count === 0)
+              throw new DomainException(ErrorCode.INSUFFICIENT_BALANCE, 'Insufficient balance');
+          }
+
+          // wallet balance 차감 leg만 저널 (isolatedMargin 이동은 포지션 회계 — 불변, 무저널)
+          return this.journalWriter.writeInTx(tx, {
             userId,
             assetSymbol: meta.quoteAsset,
             marketType: MARKET,
-            balance: { gte: delta },
-          },
-          data: { balance: { decrement: delta } },
+            kind: BalanceJournalKind.FUTURES_MARGIN_ADD,
+            deltaBalance: delta.neg(),
+            deltaLocked: ZERO,
+            sourceKey,
+            meta: { symbol, marginDelta: delta.toString() },
+          });
+        })
+        .catch((e) => {
+          // S2: tx 롤백 시 이미 적용된 debit 보상 (S0은 reflect 미실행이라 무영향)
+          if (useTruth && debited) this.ledger.rollbackDebit(parts, delta, sourceKey);
+          throw e;
         });
-        if (debit.count === 0)
-          throw new DomainException(ErrorCode.INSUFFICIENT_BALANCE, 'Insufficient balance');
-      });
+      // S2는 debit이 이미 원장 반영(seen) → reflect no-op. S0은 여기서 섀도 반영.
+      if (!useTruth) this.reflect(journal);
       return this.findPositionOrThrow(userId, symbol);
     }
 
@@ -574,7 +643,7 @@ export class FuturesTradingService {
       ? ZERO
       : initialMargin(notional(this.markOf(symbol), position.qty), position.leverage);
 
-    await this.prisma.$transaction(async (tx) => {
+    const journal = await this.prisma.$transaction(async (tx) => {
       // qty 동결 조건 포함 원자 검증 — 검증과 차감 사이 체결 반영을 차단
       const updated = await tx.position.updateMany({
         where: {
@@ -593,15 +662,32 @@ export class FuturesTradingService {
         );
       }
 
-      const credit = await tx.wallet.updateMany({
-        where: { userId, assetSymbol: meta.quoteAsset, marketType: MARKET },
-        data: { balance: { increment: withdraw } },
-      });
-      if (credit.count === 0) {
-        // 마진 보유 유저의 futures wallet 부재는 회계 버그
-        throw new Error(`futures ${meta.quoteAsset} wallet missing for user ${userId}`);
+      // S2: wallet 가산은 원장(reflect가 커밋 후 credit) — Wallet 행 UPDATE 없음. S0: 행 가산.
+      if (!useTruth) {
+        const credit = await tx.wallet.updateMany({
+          where: { userId, assetSymbol: meta.quoteAsset, marketType: MARKET },
+          data: { balance: { increment: withdraw } },
+        });
+        if (credit.count === 0) {
+          // 마진 보유 유저의 futures wallet 부재는 회계 버그
+          throw new Error(`futures ${meta.quoteAsset} wallet missing for user ${userId}`);
+        }
       }
+
+      // wallet balance 가산 leg만 저널 (isolatedMargin 회수는 포지션 회계 — 불변, 무저널)
+      return this.journalWriter.writeInTx(tx, {
+        userId,
+        assetSymbol: meta.quoteAsset,
+        marketType: MARKET,
+        kind: BalanceJournalKind.FUTURES_MARGIN_REMOVE,
+        deltaBalance: withdraw,
+        deltaLocked: ZERO,
+        sourceKey: SourceKey.marginRemove(`${userId}:${symbol}:${randomUUID()}`),
+        meta: { symbol, marginDelta: withdraw.toString() },
+      });
     });
+    // 커밋 후 원장 credit (S2=진실, S0=섀도) — 멱등 sourceKey.
+    this.reflect(journal);
     return this.findPositionOrThrow(userId, symbol);
   }
 

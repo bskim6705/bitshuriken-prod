@@ -3,6 +3,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { PrismaModule } from '@app/infra/prisma/prisma.module';
 import { ApiKeyModule } from '../api-key/api-key.module';
+import { UserModule } from '../user/user.module';
 import { MailModule } from '../mail/mail.module';
 import { TwoFactorModule } from '../two-factor/two-factor.module';
 import { AuthService } from './auth.service';
@@ -28,6 +29,7 @@ if (!secret) throw new Error('JWT_SECRET is required');
       signOptions: { expiresIn: SESSION_TTL_SECONDS },
     }),
     ApiKeyModule,
+    UserModule,
     MailModule,
     TwoFactorModule,
   ],

@@ -1,5 +1,6 @@
 import { Injectable, HttpStatus } from '@nestjs/common';
 import {
+  BalanceJournalKind,
   FundingTxType,
   FuturesIncomeType,
   MarketType,
@@ -9,6 +10,7 @@ import {
 } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '@app/infra/prisma/prisma.service';
+import { JournalWriter, SourceKey } from '@app/core-domain/ledger/journal-writer';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
 import { TwoFactorService } from '@app/core-domain/two-factor/two-factor.service';
@@ -43,6 +45,7 @@ export class AdminService {
   constructor(
     private prisma: PrismaService,
     private twoFactor: TwoFactorService,
+    private journal: JournalWriter,
   ) {}
 
   async listUsers(q: UserListQuery) {
@@ -264,6 +267,17 @@ export class AdminService {
           adminId,
           reason: dto.reason ?? null,
         },
+      });
+
+      // 저널 미러 (S0 섀도) — Wallet 가감과 동일 델타 (credit +, debit −).
+      await this.journal.writeInTx(tx, {
+        userId: targetUserId,
+        assetSymbol: dto.assetSymbol,
+        marketType: market,
+        kind: BalanceJournalKind.ADMIN_ADJUST,
+        deltaBalance: direction === 'credit' ? qty : qty.neg(),
+        deltaLocked: ZERO,
+        sourceKey: SourceKey.adminAdjust(fundingTx.id),
       });
 
       // FUTURES 지갑 조정은 income 원장에도 반영(futures history 일관성) — transfers와 동형

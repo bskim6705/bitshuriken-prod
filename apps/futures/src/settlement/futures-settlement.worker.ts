@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import {
+  BalanceJournal,
+  BalanceJournalKind,
   FuturesIncomeType,
   MarginMode,
   MarketType,
@@ -19,6 +21,12 @@ import { PrismaService } from '@app/infra/prisma/prisma.service';
 import { KafkaService } from '@app/infra/messaging/kafka.service';
 import { inboundTopic } from '@app/infra/messaging/topics';
 import { serializeCancelOrder } from '@app/infra/messaging/match-message.serializer';
+import { JournalWriter, SourceKey } from '@app/core-domain/ledger/journal-writer';
+import { LedgerService } from '@app/core-domain/ledger/ledger.service';
+import { LedgerAvailability } from '@app/core-domain/ledger/ledger-availability';
+import { LEDGER_TRUTH } from '@app/core-domain/ledger/ledger-truth';
+import { toEntry } from '@app/core-domain/ledger/journal-tailer';
+import { JournalInput } from '@app/core-domain/ledger/ledger.types';
 import { FuturesConfigService } from '../config/futures-config.service';
 import { MarkPriceService } from '../mark-price/mark-price.service';
 import {
@@ -27,6 +35,7 @@ import {
   FuturesUserEventsService,
 } from '../user-events/futures-user-events.service';
 import { floor8 } from '@app/shared/decimal';
+import { SETTLEMENT_MAX_ATTEMPTS } from '@app/shared/constants/settlement';
 import { bankruptcyPrice, liquidationPrice, unrealizedPnl } from '../math/margin-math';
 import {
   applyFill,
@@ -91,6 +100,8 @@ interface ApplyOutcome {
   positionByUser: Map<string, Map<string, FuturesPositionSnapshot>>;
   reduceOnlyChecks: Map<string, { userId: string; symbol: string }>;
   shortfallLogs: string[];
+  journalRows: BalanceJournal[]; // 이 event tx에서 커밋된 저널 엔트리 (commit 후 원장 반영)
+  affectedWalletUsers: Set<string>; // S2: wallet leg가 바뀐 유저 (commit 후 원장에서 스냅샷 합성)
 }
 
 function emptyOutcome(): ApplyOutcome {
@@ -99,6 +110,8 @@ function emptyOutcome(): ApplyOutcome {
     positionByUser: new Map(),
     reduceOnlyChecks: new Map(),
     shortfallLogs: [],
+    journalRows: [],
+    affectedWalletUsers: new Set(),
   };
 }
 
@@ -144,6 +157,7 @@ function mergeFundPosition(
 export class FuturesSettlementWorker {
   private readonly logger = new Logger(FuturesSettlementWorker.name);
   private readonly partitions = new Map<string, number>();
+  private readonly failCounts = new Map<string, number>(); // eventId → 연속 적용 실패 횟수 (ADR-067)
   private running = false;
 
   constructor(
@@ -153,7 +167,23 @@ export class FuturesSettlementWorker {
     private insuranceFund: InsuranceFundService,
     private userEvents: FuturesUserEventsService,
     private markPrice: MarkPriceService,
+    private journalWriter: JournalWriter,
+    private ledger: LedgerService,
+    private availability: LedgerAvailability,
   ) {}
+
+  /** S2 진실 경로 판정: 스위치 ON + 저널 가용(테이블 부재면 S0 행 경로로 안전 강등). */
+  private useTruth(): boolean {
+    return LEDGER_TRUTH && this.availability.enabled;
+  }
+
+  /** futures USDT 잔고 free (S2=원장 진실, S0=Wallet 행 FOR UPDATE) — flip/shortfall 판정 입력. */
+  private async walletBalanceOf(tx: Prisma.TransactionClient, userId: string): Promise<Decimal> {
+    if (this.useTruth()) {
+      return this.ledger.getDecimal({ userId, assetSymbol: USDT, marketType: MARKET }).balance;
+    }
+    return (await this.lockWallet(tx, userId)).balance;
+  }
 
   @Interval(100)
   async tick(): Promise<void> {
@@ -181,11 +211,68 @@ export class FuturesSettlementWorker {
       try {
         outcome = await this.apply(event);
       } catch (e) {
-        this.logger.error(`failed to apply futures event ${event.id} (${event.kind})`, e as Error);
-        // 포지션 전이는 순서가 정합성 조건 — 실패 이벤트를 건너뛰지 않고 중단, 다음 tick 재시도
+        // 포지션 전이는 순서가 정합성 조건 — 재시도 대상이면 건너뛰지 않고 중단, 다음 tick 재시도.
+        // 반복 실패(poison)는 격리하고 후속 이벤트 진행 — 1건이 파이프라인을 정지시키지 않게 (ADR-067).
+        const quarantined = await this.recordFailure(event, e as Error);
+        if (quarantined) continue;
         break;
       }
       await this.postApply(outcome);
+    }
+  }
+
+  /**
+   * 실패 기록: 인메모리 attempts 증가(워커 재시작 시 리셋 — poison은 threshold를 다시 채우고
+   * 격리됨), SETTLEMENT_MAX_ATTEMPTS 도달 시 격리 + DeadLetter 사본. 격리 여부 반환.
+   * DLQ 스키마 미적용(settlement-dlq 마이그레이션 전)이면 격리를 강등하고 기존 재시도 동작 유지.
+   */
+  private async recordFailure(event: SettlementEvent, err: Error): Promise<boolean> {
+    const attempts = (this.failCounts.get(event.id) ?? 0) + 1;
+    this.failCounts.set(event.id, attempts);
+    if (attempts < SETTLEMENT_MAX_ATTEMPTS) {
+      this.logger.error(
+        `failed to apply futures event ${event.id} (${event.kind}) — attempt ${attempts}/${SETTLEMENT_MAX_ATTEMPTS}, retrying`,
+        err,
+      );
+      return false;
+    }
+    try {
+      // 격리 — 상태 전이와 사본 기록을 한 트랜잭션으로. PENDING이 아니면(경합 처리됨) no-op.
+      const quarantined = await this.prisma.$transaction(async (tx) => {
+        const claim = await tx.settlementEvent.updateMany({
+          where: { id: event.id, status: SettlementStatus.PENDING },
+          data: { status: SettlementStatus.QUARANTINED },
+        });
+        if (claim.count === 0) return false;
+        await tx.settlementDeadLetter.create({
+          data: {
+            eventId: event.id,
+            seq: event.seq,
+            sourceKey: event.sourceKey,
+            kind: event.kind,
+            legs: event.legs as Prisma.InputJsonValue,
+            orderLegs: event.orderLegs as Prisma.InputJsonValue,
+            attempts,
+            lastError: err.message,
+          },
+        });
+        return true;
+      });
+      if (quarantined) {
+        this.failCounts.delete(event.id);
+        this.logger.error(
+          `QUARANTINED futures settlement event ${event.id} (${event.kind}, seq=${event.seq}, ` +
+            `sourceKey=${event.sourceKey}) after ${attempts} failed attempts — money movement NOT ` +
+            `applied; see SettlementDeadLetter. lastError: ${err.message}`,
+        );
+      }
+      return quarantined;
+    } catch (dlqErr) {
+      this.logger.error(
+        `DLQ unavailable for event ${event.id} — run the settlement-dlq prisma migration; falling back to retry`,
+        dlqErr as Error,
+      );
+      return false;
     }
   }
 
@@ -267,7 +354,7 @@ export class FuturesSettlementWorker {
     }
 
     const position = await this.lockPosition(tx, userId, leg.symbol);
-    const wallet = await this.lockWallet(tx, userId);
+    const walletBalance = await this.walletBalanceOf(tx, userId);
 
     const fill: Fill = {
       price: new Decimal(leg.price),
@@ -290,7 +377,7 @@ export class FuturesSettlementWorker {
       isolatedMargin: position.isolatedMargin,
       leverage: position.leverage,
     };
-    const result = applyFill(state, fill, { balance: wallet.balance });
+    const result = applyFill(state, fill, { balance: walletBalance });
 
     const updatedPosition = await tx.position.update({
       where: { userId_tickerSymbol: { userId, tickerSymbol: leg.symbol } },
@@ -300,15 +387,41 @@ export class FuturesSettlementWorker {
         isolatedMargin: result.newPosition.isolatedMargin,
       },
     });
-    const updatedWallet = await tx.wallet.update({
-      where: {
-        userId_assetSymbol_marketType: { userId, assetSymbol: USDT, marketType: MARKET },
+    // S2: Wallet 행 UPDATE 없음 — 저널이 진실, 커밋 후 원장 반영. S0: 행 변이(마진해제+PnL+수수료 합산).
+    if (!this.useTruth()) {
+      const updatedWallet = await tx.wallet.update({
+        where: {
+          userId_assetSymbol_marketType: { userId, assetSymbol: USDT, marketType: MARKET },
+        },
+        data: {
+          balance: { increment: result.walletDeltas.balanceDelta },
+          locked: { increment: result.walletDeltas.lockedDelta },
+        },
+      });
+      this.recordWallet(outcome, updatedWallet);
+    }
+    outcome.affectedWalletUsers.add(userId);
+    // wallet 변이(마진해제+PnL+수수료 합산) 1건 = 저널 1건, 분해는 meta에
+    await this.journalLeg(
+      tx,
+      {
+        userId,
+        assetSymbol: USDT,
+        marketType: MARKET,
+        kind: BalanceJournalKind.FUTURES_TRADE,
+        deltaBalance: result.walletDeltas.balanceDelta,
+        deltaLocked: result.walletDeltas.lockedDelta,
+        sourceKey: `${event.sourceKey}:${role}`,
+        meta: {
+          role,
+          income: result.incomeRecords.map((r) => ({
+            type: r.incomeType,
+            amount: r.income.toString(),
+          })),
+        },
       },
-      data: {
-        balance: { increment: result.walletDeltas.balanceDelta },
-        locked: { increment: result.walletDeltas.lockedDelta },
-      },
-    });
+      outcome,
+    );
 
     for (const inc of result.incomeRecords) {
       await tx.futuresIncome.create({
@@ -359,7 +472,6 @@ export class FuturesSettlementWorker {
       );
     }
 
-    this.recordWallet(outcome, updatedWallet);
     this.recordPosition(outcome, updatedPosition);
     outcome.reduceOnlyChecks.set(`${userId}:${leg.symbol}`, { userId, symbol: leg.symbol });
   }
@@ -385,17 +497,36 @@ export class FuturesSettlementWorker {
     );
     if (refund.lte(0)) return;
 
-    const wallet = await tx.wallet.update({
-      where: {
-        userId_assetSymbol_marketType: {
-          userId: leg.userId,
-          assetSymbol: USDT,
-          marketType: MARKET,
+    // S2: Wallet 행 UPDATE 없음 — 저널이 진실. S0: locked→balance 행 환불.
+    if (!this.useTruth()) {
+      const wallet = await tx.wallet.update({
+        where: {
+          userId_assetSymbol_marketType: {
+            userId: leg.userId,
+            assetSymbol: USDT,
+            marketType: MARKET,
+          },
         },
+        data: { locked: { decrement: refund }, balance: { increment: refund } },
+      });
+      this.recordWallet(outcome, wallet);
+    }
+    outcome.affectedWalletUsers.add(leg.userId);
+    // 미체결 lockedCost 환불(locked→balance) 저널
+    await this.journalLeg(
+      tx,
+      {
+        userId: leg.userId,
+        assetSymbol: USDT,
+        marketType: MARKET,
+        kind: BalanceJournalKind.FUTURES_REFUND,
+        deltaBalance: refund,
+        deltaLocked: refund.neg(),
+        sourceKey: SourceKey.futuresRefund(leg.orderId),
+        meta: { orderId: leg.orderId, refund: refund.toString() },
       },
-      data: { locked: { decrement: refund }, balance: { increment: refund } },
-    });
-    this.recordWallet(outcome, wallet);
+      outcome,
+    );
   }
 
   // ---------- FUNDING ----------
@@ -414,20 +545,39 @@ export class FuturesSettlementWorker {
       );
       // 잠금 순서 Position→Wallet 통일 (trade apply/HTTP 경로와 교착 방지) — margin을 만질 수 있는 지불 측만
       if (payment.isNegative()) await this.lockPosition(tx, leg.userId, leg.symbol);
-      const wallet = await this.lockWallet(tx, leg.userId);
-      const application = applyFundingPayment(payment, wallet.balance);
+      const balance = await this.walletBalanceOf(tx, leg.userId);
+      const application = applyFundingPayment(payment, balance);
 
-      const updatedWallet = await tx.wallet.update({
-        where: {
-          userId_assetSymbol_marketType: {
-            userId: leg.userId,
-            assetSymbol: USDT,
-            marketType: MARKET,
+      // S2: Wallet 행 UPDATE 없음 — 저널이 진실. S0: balance 행 반영.
+      if (!this.useTruth()) {
+        const updatedWallet = await tx.wallet.update({
+          where: {
+            userId_assetSymbol_marketType: {
+              userId: leg.userId,
+              assetSymbol: USDT,
+              marketType: MARKET,
+            },
           },
+          data: { balance: { increment: application.balanceDelta } },
+        });
+        this.recordWallet(outcome, updatedWallet);
+      }
+      outcome.affectedWalletUsers.add(leg.userId);
+      // 펀딩 wallet leg만 저널 (balance 부족분의 margin 흡수는 포지션 회계 — 불변, 무저널)
+      await this.journalLeg(
+        tx,
+        {
+          userId: leg.userId,
+          assetSymbol: USDT,
+          marketType: MARKET,
+          kind: BalanceJournalKind.FUTURES_FUNDING,
+          deltaBalance: application.balanceDelta,
+          deltaLocked: ZERO,
+          sourceKey: `${event.sourceKey}:${leg.userId}`,
+          meta: { payment: payment.toString(), marginDelta: application.marginDelta.toString() },
         },
-        data: { balance: { increment: application.balanceDelta } },
-      });
-      this.recordWallet(outcome, updatedWallet);
+        outcome,
+      );
 
       if (!application.marginDelta.isZero()) {
         // balance 부족분은 margin에서 — 음수 허용(zero-sum). 청산 판정은 모니터가 mark tick마다 수행.
@@ -554,6 +704,19 @@ export class FuturesSettlementWorker {
 
   // ---------- 공통 ----------
 
+  /**
+   * S0: leg별 저널 write — 커밋된 wallet 변이를 미러링. 강등 시 writeInTx가 null(호출측 tx에 stmt
+   * 미발행)이라 push 생략, 정산 tx 무영향. commit 후 postApply가 journalRows를 원장에 반영.
+   */
+  private async journalLeg(
+    tx: Prisma.TransactionClient,
+    input: JournalInput,
+    outcome: ApplyOutcome,
+  ): Promise<void> {
+    const row = await this.journalWriter.writeInTx(tx, input);
+    if (row) outcome.journalRows.push(row);
+  }
+
   /** 기금 wallet 반영(signed — 상쇄 손실은 음수) + INSURANCE_CLEAR 원장. */
   private async creditFund(
     tx: Prisma.TransactionClient,
@@ -563,16 +726,36 @@ export class FuturesSettlementWorker {
     outcome: ApplyOutcome,
   ): Promise<void> {
     const fundUserId = await this.insuranceFund.userId();
-    const wallet = await tx.wallet.update({
-      where: {
-        userId_assetSymbol_marketType: {
-          userId: fundUserId,
-          assetSymbol: USDT,
-          marketType: MARKET,
+    // S2: Wallet 행 UPDATE 없음 — 저널이 진실. S0: 기금 balance 행 반영(signed).
+    if (!this.useTruth()) {
+      const wallet = await tx.wallet.update({
+        where: {
+          userId_assetSymbol_marketType: {
+            userId: fundUserId,
+            assetSymbol: USDT,
+            marketType: MARKET,
+          },
         },
+        data: { balance: { increment: amount } },
+      });
+      this.recordWallet(outcome, wallet);
+    }
+    outcome.affectedWalletUsers.add(fundUserId);
+    // 보험기금 wallet 반영(signed) 저널 — 호출자 sourceKey 재사용(정산 이벤트가 멱등 보장)
+    await this.journalLeg(
+      tx,
+      {
+        userId: fundUserId,
+        assetSymbol: USDT,
+        marketType: MARKET,
+        kind: BalanceJournalKind.FUTURES_INSURANCE_FUND,
+        deltaBalance: amount,
+        deltaLocked: ZERO,
+        sourceKey,
+        meta: { symbol },
       },
-      data: { balance: { increment: amount } },
-    });
+      outcome,
+    );
     await tx.futuresIncome.create({
       data: {
         userId: fundUserId,
@@ -582,7 +765,6 @@ export class FuturesSettlementWorker {
         sourceKey,
       },
     });
-    this.recordWallet(outcome, wallet);
   }
 
   /** Position 행 잠금. 행이 없으면 기본값으로 생성 후 잠금 (첫 체결 시점). */
@@ -625,6 +807,33 @@ export class FuturesSettlementWorker {
   // ---------- commit 후 후처리 ----------
 
   private async postApply(outcome: ApplyOutcome): Promise<void> {
+    // 커밋된 futures 저널 엔트리를 인메모리 원장에 즉시 멱등 반영 (테일러가 백스톱).
+    // S2에선 이게 진실 반영, S0에선 섀도 — 반영 실패는 삼키되 소리내어 기록(정산 파이프라인 무영향).
+    for (const row of outcome.journalRows) {
+      try {
+        this.ledger.applyJournal(toEntry(row));
+      } catch (e) {
+        this.logger.error(`ledger applyJournal failed for ${row.sourceKey}`, e as Error);
+      }
+    }
+
+    // S2: Wallet 행을 안 만졌으므로 스냅샷을 원장(진실)에서 합성 (프로젝터가 행을 뒤따라 갱신).
+    if (this.useTruth()) {
+      for (const userId of outcome.affectedWalletUsers) {
+        const { balance, locked } = this.ledger.getDecimal({
+          userId,
+          assetSymbol: USDT,
+          marketType: MARKET,
+        });
+        outcome.walletByUser.set(userId, {
+          asset: USDT,
+          free: balance.toFixed(8),
+          locked: locked.toFixed(8),
+          ts: Date.now(),
+        });
+      }
+    }
+
     for (const msg of outcome.shortfallLogs) {
       this.logger.error(msg);
     }
