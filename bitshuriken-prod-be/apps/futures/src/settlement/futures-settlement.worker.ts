@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import {
   BalanceJournal,
@@ -154,11 +154,23 @@ function mergeFundPosition(
  * 포지션 의존 계산(EP/RPNL/마진)은 Position 행을 SELECT FOR UPDATE로 잠근 트랜잭션 안에서 수행.
  */
 @Injectable()
-export class FuturesSettlementWorker {
+export class FuturesSettlementWorker implements OnApplicationShutdown {
   private readonly logger = new Logger(FuturesSettlementWorker.name);
   private readonly partitions = new Map<string, number>();
   private readonly failCounts = new Map<string, number>(); // eventId → 연속 적용 실패 횟수 (ADR-067)
   private running = false;
+  private stopping = false;
+
+  /** 종료 시퀀스: 새 tick 차단 후 진행 중 tick의 tx가 끝날 때까지 대기 — 포지션 전이가 찢기지 않는다. */
+  async onApplicationShutdown(): Promise<void> {
+    this.stopping = true;
+    const deadline = Date.now() + 15_000;
+    while (this.running && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (this.running) this.logger.error('shutdown: futures settlement tick still running after 15s grace');
+    else this.logger.log('futures settlement worker quiesced');
+  }
 
   constructor(
     private prisma: PrismaService,
@@ -187,7 +199,7 @@ export class FuturesSettlementWorker {
 
   @Interval(100)
   async tick(): Promise<void> {
-    if (this.running) return; // 이전 tick이 아직 처리 중이면 skip
+    if (this.running || this.stopping) return; // 이전 tick 처리 중 / 종료 시퀀스 중이면 skip
     this.running = true;
     try {
       await this.drain();

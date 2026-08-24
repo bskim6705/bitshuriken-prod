@@ -10,6 +10,10 @@ import { loadRateLimitRuntime } from '../rate-limit/rate-limit.config';
  * rate-limit 인터셉터 자체는 RateLimitModule(APP_INTERCEPTOR)에서 DI로 등록된다.
  */
 export function applyGlobalPipeline(app: INestApplication): void {
+  // SIGTERM/SIGINT → app.close(): HTTP·컨슈머 정지, 워커 quiesce 훅, producer/consumer disconnect.
+  // 이 한 줄이 없으면 모든 onModuleDestroy/onApplicationShutdown이 죽은 코드다 — 모든 정지가
+  // unclean kill이 되어 in-flight 정산이 찢긴다 (재기동 정합성 사고 계열의 코드 레벨 기전).
+  app.enableShutdownHooks();
   app.useGlobalPipes(new ValidationPipe({ whitelist: true }));
   app.useGlobalInterceptors(new ResponseInterceptor());
   app.useGlobalFilters(new HttpExceptionFilter());

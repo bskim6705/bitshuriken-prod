@@ -252,8 +252,39 @@ do_start(){
 }
 
 # ---------- stop ----------
+# 단계화된 정지 (F0): 봇 INT → BE TERM+드레인 대기 → 엔진 TERM(최종 스냅샷) → 에스컬레이션.
+# BE는 enableShutdownHooks로 SIGTERM에서 컨슈머 정지→워커 quiesce→disconnect를 자체 수행하고,
+# 엔진은 SIGTERM에서 dirty lane 최종 스냅샷+flush 후 종료한다 — 무순서 pkill은 그 전부를 찢었다.
+wait_gone(){ # pattern timeout_s — 패턴이 사라질 때까지 대기, 성공 0
+  local pat="$1" t=0 max="$2"
+  while (( t < max )); do
+    pgrep -f "$pat" >/dev/null 2>&1 || return 0
+    sleep 1; t=$((t+1))
+  done
+  return 1
+}
+
+graceful_stop(){
+  # ① 봇/에이전트: 피더부터 끊는다 (INT — 봇의 자체 정리: 메이커 주문 취소+검증)
+  pkill -INT -f "bitshuriken-prod-bots/node_modules" 2>/dev/null
+  pkill -INT -f "npm run bots" 2>/dev/null
+  pkill -INT -f "bitshuriken-prod-agents/node_modules" 2>/dev/null
+  wait_gone "bitshuriken-prod-bots/node_modules" 30 || info "bots still alive after 30s — will escalate"
+
+  # ② BE: TERM → 셧다운 시퀀스(신규 요청 거부·컨슈머 정지·워커 quiesce) 완료 대기
+  pkill -f "dist/apps/(spot|futures|portal)/main" 2>/dev/null
+  pkill -f "npm run start:prod:(spot|futures|portal)" 2>/dev/null
+  wait_gone "dist/apps/(spot|futures|portal)/main" 30 || info "BE still alive after 30s — will escalate"
+
+  # ③ 엔진: TERM → 최종 스냅샷 발행+flush 완료 대기
+  pkill -f "bitshuriken-match-(spot|futures)" 2>/dev/null
+  pkill -f "MacOS/Python main.py" 2>/dev/null
+  wait_gone "bitshuriken-match-(spot|futures)" 20 || info "engines still alive after 20s — will escalate"
+}
+
 do_stop(){
-  kill_all
+  graceful_stop
+  kill_all   # 잔여물 에스컬레이션(-9)·포트 정리 — 위 단계가 성공했으면 사실상 no-op
   # 좀비 슈퍼바이저 감시: 20s 안에 무언가 되살아나면 외부 간섭 존재
   sleep 20
   if [[ "$(alive_count)" != "0" ]]; then

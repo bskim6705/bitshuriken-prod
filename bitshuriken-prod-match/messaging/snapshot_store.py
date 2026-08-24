@@ -126,6 +126,20 @@ class SnapshotStore:
         for i, lane in enumerate(lanes):
             lane.last_snapshot_ms = boot_ms - (i * self.interval_ms) // max(len(lanes), 1)
 
+    def publish_all_dirty(self, lanes: list[Lane]) -> None:
+        """종료 직전 최종 스냅샷 — dirty lane 전부, 간격 무시. 실패는 로그만(WAL replay가 복구)."""
+        for lane in lanes:
+            if not lane.dirty:
+                continue
+            try:
+                snap = SnapshotMsg.from_book(lane.book, lane.last_offset)
+                self.producer.emit_keyed(
+                    lane.topic_state, lane.partition, lane.book.symbol, snap.to_dict()
+                )
+                lane.dirty = False
+            except Exception as e:
+                print(f"final snapshot publish failed: {lane.book.symbol}: {e}")
+
     def publish_due(self, lanes: list[Lane]) -> None:
         """메시지 처리 사이에 호출 — 상태+offset 원자 저장.
 

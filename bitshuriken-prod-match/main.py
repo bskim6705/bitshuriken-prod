@@ -9,6 +9,7 @@ skip하고 일반 처리. control 토픽 add는 부팅 시 흡수 + 라이브 �
 
 import gc
 import os
+import signal
 
 import orjson
 from dotenv import load_dotenv
@@ -108,9 +109,20 @@ def main() -> None:
 
     print(f"match started, markets={markets}, lanes={registry.symbols()}")
 
+    # SIGTERM 기본 동작은 즉사라 finally가 실행되지 않는다 — 핸들러로 루프를 빠져나와
+    # 최종 스냅샷+flush를 보장한다 (unclean stop이 dirty book을 WAL replay에만 맡기던 갭).
+    stopping = {"flag": False}
+
+    def _request_stop(signum: int, _frame: object) -> None:
+        stopping["flag"] = True
+        print(f"signal {signum} — draining for final snapshot…")
+
+    signal.signal(signal.SIGTERM, _request_stop)
+    signal.signal(signal.SIGINT, _request_stop)
+
     idle_ticks = 0
     try:
-        while True:
+        while not stopping["flag"]:
             msg = consumer.poll(1.0)
             if msg is None:
                 store.publish_due(lanes)
@@ -170,8 +182,10 @@ def main() -> None:
             # 트래픽이 끊기지 않는 lane도 30s 상한을 지키도록 메시지 처리 후에도 체크
             store.publish_due(lanes)
     finally:
-        consumer.close()
+        store.publish_all_dirty(registry.all())  # 라이브 상장 lane 포함
         producer.flush()
+        consumer.close()
+        print("match stopped clean (final snapshots published)")
 
 
 if __name__ == "__main__":
