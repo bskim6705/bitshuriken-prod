@@ -41,13 +41,12 @@ DB append-only 저널(Kafka 아님) · 저널 커밋 후 응답(RPO 0 — **원�
   단일 인스턴스 가드·stop 순서(BE 앞, 엔진 뒤 아님 — PENDING 드레인 주체)·status 스탠자.
 - **게이트**: kill -9 드릴(정산 프로세스 행 포함) F1~F5 0 fail + 미러 동반 TPS 재측정.
 
-### M1 본체의 의존성 눈사태 (실사 추가 발견 — 설계 필요)
-`FuturesSettlementWorker`가 `MarkPriceService`를 주입받고(shortfall/ADL 판정), MarkPrice는
-`OrderBookCacheService`를 읽는다(computeMarks) — 워커를 옮기면 인덱스 컨슈머+북 컨슈머까지
-따라온다. 선택지: ① settle 프로세스에 자체 인덱스 컨슈머+경량 북 미러(그룹 분리, 저비용이면 수용)
-② 워커의 mark 의존을 "정산 시점 mark 스냅샷"으로 좁혀 futures 앱이 SettlementEvent에 mark를
-동봉(스키마 추가 — ADR-067 교훈: 신규 컬럼은 pre-migration unsafe, 신규 테이블/컬럼 마이그레이션
-동반) ③ mark를 저널/DB 프로젝션으로. 이 결정이 M1 본체 착수 전 첫 설계 항목.
+### mark 의존 — 해소됨 (유저 결정 "이벤트 동봉" = 기존 구조로 이미 충족)
+실사 결과 워커의 mark 사용은 ① `leg.mark` — 청산/펀딩 legs가 **생성 시점에 mark를 이미 동봉**
+(생성자인 futures 앱이 mark 보유) ② WS 스냅샷 보강용 `tryGetMark`(nullable, settle엔 구독자
+없음) 뿐. 컨슈머 경로는 mark 무사용. 따라서 스키마 변경·마이그레이션 불요 — settle의 워커에는
+`MARK_READER` 토큰으로 null-리더를 주입하고(futures 앱은 MarkPriceService 바인딩), 정산 수학은
+legs 동봉 mark로 종전과 동일하게 결정적. 의존성 눈사태는 발생하지 않는다.
 
 ## 리스크 (적대 검증 표적)
 정산 레플리카 랙 창의 flip/shortfall 오판 / A13 테일러 gap-grace(500ms 영구 스킵) × 프로세스 간

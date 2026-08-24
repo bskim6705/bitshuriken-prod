@@ -102,8 +102,8 @@ PATTERNS=(
   # pgrep/pkill하면 절대 안 잡혀 old BE가 안 죽고 포트를 계속 점유 → 새 start:prod가 bind
   # 실패로 조용히 죽고 verify는 OLD 프로세스(HTTP 200)에 통과 → 재빌드가 무통보 미배포
   # (2026-07-16 관찰 #27). 상대 argv(node) + npm 래퍼 둘 다 매칭. start:dev는 안 잡힌다.
-  "dist/apps/(spot|futures|portal)/main"
-  "npm run start:prod:(spot|futures|portal)"
+  "dist/apps/(spot|futures|portal|settle)/main"
+  "npm run start:prod:(spot|futures|portal|settle)"
   "bitshuriken-prod-be/node_modules/.bin/nest"
   "bitshuriken-prod-fe/node_modules/.bin/next"
   "bitshuriken-match-(spot|futures)"
@@ -140,7 +140,7 @@ alive_count(){ alive_list | wc -l | tr -d ' '; }
 # BE 포트로 직접 식별/정리 — 상대 argv가 패턴을 빠져나가도 bind 전 포트 확보를 보장.
 # (포트 5101/5102/5103은 이 거래소 전용) 함정: 재빌드 전 old 리스너가 포트를 안 놓으면
 # 새 start:prod가 bind 실패로 조용히 죽고 verify는 old에 통과한다 (관찰 #27).
-BE_PORTS=(5101 5102 5103)
+BE_PORTS=(5101 5102 5103 5104)
 port_pid(){ lsof -ti "tcp:$1" -sTCP:LISTEN 2>/dev/null | head -1; } # 해당 포트 LISTEN pid (없으면 빈값)
 free_be_ports(){ # BE 포트를 잡은 잔여 리스너를 TERM→KILL
   local port lp
@@ -204,6 +204,7 @@ do_start(){
   start_component be-spot    "npm run start:prod:spot"    "$ROOT/bitshuriken-prod-be"
   start_component be-futures "npm run start:prod:futures" "$ROOT/bitshuriken-prod-be"
   start_component be-portal  "npm run start:prod:portal"  "$ROOT/bitshuriken-prod-be"
+  start_component be-settle  "npm run start:prod:settle"  "$ROOT/bitshuriken-prod-be"
   # HTTP 통과만으로는 부족: old BE가 포트를 쥔 채 응답하면 재빌드가 미배포돼도 200이 나온다.
   # 포트를 실제로 잡은 pid가 방금 스폰한 래퍼의 자손인지 확인해 무통보 미배포를 차단 (관찰 #27).
   wait_http "http://localhost:5101/spot/market/depth?symbol=BTCUSDT" "^200$" 300 be-spot    || die "be-spot dead — logs/be-spot.log"
@@ -212,6 +213,9 @@ do_start(){
   assert_be_listener be-futures 5102 "$PID_DIR/be-futures.pid"
   wait_http "http://localhost:5103/docs" "^(200|301|302)$" 120 be-portal  || die "be-portal dead — logs/be-portal.log"
   assert_be_listener be-portal  5103 "$PID_DIR/be-portal.pid"
+  # settle(M1): 정산 티어 — 엔진보다 먼저 떠야 신규 그룹이 out 토픽을 처음부터 잡는다
+  wait_http "http://localhost:5104/health" "^200$" 120 be-settle || die "be-settle dead — logs/be-settle.log"
+  assert_be_listener be-settle  5104 "$PID_DIR/be-settle.pid"
 
   # 4) 매칭엔진 2instance — argv[0]을 exec -a로 식별명 강제 (위 함정 참조),
   #    인스턴스별 생존+로그 검증, 3회 재시도. 중복 인스턴스는 파티션을 쪼개므로
@@ -245,10 +249,10 @@ do_start(){
   #    PPID=1(고아) dist main = 죽은 래퍼의 잔재 or 외부 슈퍼바이저 소행 → 실패.
   sleep 15
   local orphan
-  orphan="$(ps -o pid,ppid,command -ax | awk '$2==1 && /dist\/apps\/(spot|futures|portal)\/main/ {print $1}' | wc -l | tr -d ' ')"
+  orphan="$(ps -o pid,ppid,command -ax | awk '$2==1 && /dist\/apps\/(spot|futures|portal|settle)\/main/ {print $1}' | wc -l | tr -d ' ')"
   [[ "$orphan" != "0" ]] && die "orphaned dist-build BE detected ($orphan) — 죽은 래퍼 잔재 or 외부 슈퍼바이저. ps -o pid,ppid,command -ax | grep dist/apps 확인"
 
-  ok "EXCHANGE UP — fe:5100 spot:5101 futures:5102 portal:5103"
+  ok "EXCHANGE UP — fe:5100 spot:5101 futures:5102 portal:5103 settle:5104"
 }
 
 # ---------- stop ----------
@@ -272,11 +276,16 @@ graceful_stop(){
   wait_gone "bitshuriken-prod-bots/node_modules" 30 || info "bots still alive after 30s — will escalate"
 
   # ② BE: TERM → 셧다운 시퀀스(신규 요청 거부·컨슈머 정지·워커 quiesce) 완료 대기
-  pkill -f "dist/apps/(spot|futures|portal)/main" 2>/dev/null
-  pkill -f "npm run start:prod:(spot|futures|portal)" 2>/dev/null
-  wait_gone "dist/apps/(spot|futures|portal)/main" 30 || info "BE still alive after 30s — will escalate"
+  pkill -f "dist/apps/(spot|futures|portal|settle)/main" 2>/dev/null
+  pkill -f "npm run start:prod:(spot|futures|portal|settle)" 2>/dev/null
+  wait_gone "dist/apps/(spot|futures|portal|settle)/main" 30 || info "BE still alive after 30s — will escalate"
 
-  # ③ 엔진: TERM → 최종 스냅샷 발행+flush 완료 대기
+  # ③ settle: BE(주문 유입) 정지 후 → 정산 드레인·컨슈머 오프셋 플러시 대기
+  pkill -f "dist/apps/settle/main" 2>/dev/null
+  pkill -f "npm run start:prod:settle" 2>/dev/null
+  wait_gone "dist/apps/settle/main" 30 || info "settle still alive after 30s — will escalate"
+
+  # ④ 엔진: TERM → 최종 스냅샷 발행+flush 완료 대기
   pkill -f "bitshuriken-match-(spot|futures)" 2>/dev/null
   pkill -f "MacOS/Python main.py" 2>/dev/null
   wait_gone "bitshuriken-match-(spot|futures)" 20 || info "engines still alive after 20s — will escalate"
@@ -327,6 +336,7 @@ do_status(){
   printf "  %-12s %s\n" be-spot    "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 'http://localhost:5101/spot/market/depth?symbol=BTCUSDT' 2>/dev/null)"
   printf "  %-12s %s\n" be-futures "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 'http://localhost:5102/docs' 2>/dev/null)"
   printf "  %-12s %s\n" be-portal  "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 'http://localhost:5103/docs' 2>/dev/null)"
+  printf "  %-12s %s\n" be-settle  "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 'http://localhost:5104/health' 2>/dev/null)"
   echo "== engines (want 1 each) =="
   printf "  match-spot: %s  match-futures: %s\n" \
     "$(pgrep -f 'bitshuriken-match-spot' | wc -l | tr -d ' ')" \
