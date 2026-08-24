@@ -213,12 +213,13 @@ export class FuturesTradingService {
           status: { in: OPEN_STATUSES },
           reduceOnly: false,
         },
-        select: { price: true, origQty: true, executedQty: true },
+        select: { price: true, origQty: true, executedQty: true, side: true },
       });
       assertWithinMaxNotional({
         position,
         mark,
         openOrders,
+        newSide: dto.side,
         newNotional: estNotional,
         maxNotional: config.maxNotional,
       });
@@ -310,12 +311,13 @@ export class FuturesTradingService {
           status: { in: OPEN_STATUSES },
           reduceOnly: false,
         },
-        select: { price: true, origQty: true, executedQty: true },
+        select: { price: true, origQty: true, executedQty: true, side: true },
       });
       assertWithinMaxNotional({
         position,
         mark,
         openOrders,
+        newSide: dto.side,
         newNotional: estNotional,
         maxNotional: config.maxNotional,
       });

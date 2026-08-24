@@ -141,18 +141,30 @@ export interface OpenOrderQtyRow {
   price: Decimal | null;
   origQty: Decimal | null;
   executedQty: Decimal;
+  side: OrderSide;
 }
 
-/** 현 포지션 + 미체결(reduceOnly 제외) 잔량 + 신규 notional ≤ maxNotional. */
+/**
+ * 방향별 노출 캡: 신규 주문 방향의 노출(같은 방향 포지션 + 같은 방향 미체결(reduceOnly 제외)
+ * 잔량 + 신규) ≤ maxNotional. 반대 방향 포지션·미체결은 이 방향의 노출을 늘리지 않으므로
+ * 세지 않는다(상쇄도 하지 않는다 — 보수적). 방향 무시 합산은 양쪽 호가를 걸치는 계정(마켓
+ * 메이커)의 정상 주문을 자기 반대편 잔량 때문에 거절한다.
+ */
 export function assertWithinMaxNotional(params: {
   position: Pick<Position, 'qty'> | null;
   mark: Decimal;
   openOrders: OpenOrderQtyRow[];
+  newSide: OrderSide;
   newNotional: Decimal;
   maxNotional: Decimal;
 }): void {
-  let total = params.position ? notional(params.mark, params.position.qty) : ZERO;
+  const posQty = params.position?.qty ?? ZERO;
+  const posSameDirection =
+    (params.newSide === OrderSide.BUY && posQty.gt(0)) ||
+    (params.newSide === OrderSide.SELL && posQty.lt(0));
+  let total = posSameDirection ? notional(params.mark, posQty) : ZERO;
   for (const o of params.openOrders) {
+    if (o.side !== params.newSide) continue;
     const remaining = (o.origQty ?? ZERO).sub(o.executedQty);
     if (remaining.lte(0)) continue;
     total = total.add(notional(o.price ?? params.mark, remaining));
@@ -160,7 +172,7 @@ export function assertWithinMaxNotional(params: {
   if (total.add(params.newNotional).gt(params.maxNotional)) {
     throw new DomainException(
       ErrorCode.MAX_NOTIONAL_EXCEEDED,
-      `total notional would exceed maxNotional ${params.maxNotional.toFixed(8)}`,
+      `${params.newSide} exposure would exceed maxNotional ${params.maxNotional.toFixed(8)}`,
     );
   }
 }
