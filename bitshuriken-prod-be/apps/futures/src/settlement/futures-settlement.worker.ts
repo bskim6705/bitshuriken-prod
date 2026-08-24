@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import {
   BalanceJournal,
@@ -28,7 +28,8 @@ import { LEDGER_TRUTH } from '@app/core-domain/ledger/ledger-truth';
 import { toEntry } from '@app/core-domain/ledger/journal-tailer';
 import { JournalInput } from '@app/core-domain/ledger/ledger.types';
 import { FuturesConfigService } from '../config/futures-config.service';
-import { MarkPriceService } from '../mark-price/mark-price.service';
+import { MARK_READER } from './mark-reader';
+import type { MarkReader } from './mark-reader';
 import {
   FuturesBalanceSnapshot,
   FuturesPositionSnapshot,
@@ -178,7 +179,7 @@ export class FuturesSettlementWorker implements OnApplicationShutdown {
     private futuresConfig: FuturesConfigService,
     private insuranceFund: InsuranceFundService,
     private userEvents: FuturesUserEventsService,
-    private markPrice: MarkPriceService,
+    @Inject(MARK_READER) private markPrice: MarkReader,
     private journalWriter: JournalWriter,
     private ledger: LedgerService,
     private availability: LedgerAvailability,

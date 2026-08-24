@@ -25,7 +25,7 @@ const MARKET: MarketType = MarketType.FUTURES;
 const USDT = 'USDT';
 const BPS_DENOMINATOR = new Decimal(10000);
 
-const TERMINAL_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
+export const TERMINAL_FUTURES_ORDER_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
   'FILLED',
   'CANCELED',
   'REJECTED',
@@ -150,8 +150,8 @@ export class FuturesMatchResultService {
       status = 'EXPIRED';
     }
 
-    const wasTerminal = TERMINAL_STATUSES.has(order.status);
-    const isTerminal = TERMINAL_STATUSES.has(status);
+    const wasTerminal = TERMINAL_FUTURES_ORDER_STATUSES.has(order.status);
+    const isTerminal = TERMINAL_FUTURES_ORDER_STATUSES.has(status);
 
     if (isTerminal) {
       if (wasTerminal) {

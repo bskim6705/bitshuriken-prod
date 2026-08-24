@@ -9,12 +9,13 @@ import { isMarketLike } from '@app/shared/order-classify';
 import { buildExecutionReport, FillDetail } from '../order/execution-report';
 import { OrderUpdateData, TradeData } from '@app/infra/messaging/match-message.parser';
 
-const TERMINAL_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
+export const TERMINAL_ORDER_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
   'FILLED',
   'CANCELED',
   'REJECTED',
   'EXPIRED',
 ]);
+const TERMINAL_STATUSES = TERMINAL_ORDER_STATUSES;
 
 /** spot 매칭 결과(TR/OU) 처리 orchestrator — 정산 기록·주문 상태·OCO·stats·user-stream 위임. */
 @Injectable()

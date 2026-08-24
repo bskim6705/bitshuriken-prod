@@ -35,6 +35,15 @@
       "compilerOptions": {
         "tsConfigPath": "apps/portal/tsconfig.app.json"
       }
+    },
+    "settle": {
+      "type": "application",
+      "root": "apps/settle",
+      "entryFile": "main",
+      "sourceRoot": "apps/settle/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/settle/tsconfig.app.json"
+      }
     }
   }
 }

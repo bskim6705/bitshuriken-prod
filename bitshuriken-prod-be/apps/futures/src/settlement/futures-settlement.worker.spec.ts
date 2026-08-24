@@ -5,7 +5,7 @@ import { KafkaService } from '@app/infra/messaging/kafka.service';
 import { JournalWriter } from '@app/core-domain/ledger/journal-writer';
 import { LedgerService } from '@app/core-domain/ledger/ledger.service';
 import { FuturesConfigService } from '../config/futures-config.service';
-import { MarkPriceService } from '../mark-price/mark-price.service';
+import { MarkReader } from './mark-reader';
 import { FuturesUserEventsService } from '../user-events/futures-user-events.service';
 import { InsuranceFundService } from './insurance-fund.service';
 import { FuturesSettlementWorker } from './futures-settlement.worker';
@@ -433,7 +433,7 @@ function makeWorker(db: FakePrisma, opts: { truth?: boolean } = {}) {
     config as unknown as FuturesConfigService,
     fund as unknown as InsuranceFundService,
     userEvents,
-    markPrice as unknown as MarkPriceService,
+    markPrice as unknown as MarkReader,
     journalWriter,
     ledger,
     workerAvailability as never,

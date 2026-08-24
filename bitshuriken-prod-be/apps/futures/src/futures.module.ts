@@ -8,7 +8,6 @@ import { FuturesMarketModule } from './http/market/futures-market.module';
 import { FuturesTradingModule } from './http/trading/futures-trading.module';
 import { FuturesWsModule } from './http/ws/futures-ws.module';
 import { FuturesConsumerModule } from './consumer/futures-consumer.module';
-import { FuturesSettlementModule } from './settlement/futures-settlement.module';
 import { FundingModule } from './funding/funding.module';
 import { LiquidationModule } from './liquidation/liquidation.module';
 import { NetWorthModule } from './net-worth/net-worth.module';
@@ -28,7 +27,6 @@ import { NetWorthModule } from './net-worth/net-worth.module';
     FuturesTradingModule,
     FuturesWsModule,
     FuturesConsumerModule,
-    FuturesSettlementModule,
     FundingModule,
     LiquidationModule,
     NetWorthModule,

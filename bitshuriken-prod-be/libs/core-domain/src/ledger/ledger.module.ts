@@ -8,6 +8,7 @@ import { JournalWriter } from './journal-writer';
 import { LedgerAvailability } from './ledger-availability';
 import { LedgerBaseliner } from './ledger-baseliner';
 import { LedgerBootstrap } from './ledger-bootstrap';
+import { LedgerReplicaBootstrap } from './ledger-replica-bootstrap';
 import { LedgerProjector } from './ledger-projector';
 import { LEDGER_OWNED_MARKETS, LedgerService } from './ledger.service';
 
@@ -53,6 +54,21 @@ export class LedgerModule {
       providers: [
         { provide: LEDGER_OWNED_MARKETS, useValue: ownedMarkets },
         LedgerBootstrap,
+      ],
+    };
+  }
+
+  /**
+   * 읽기 레플리카 배선 (M1 정산 프로세스): 부팅 시 저널 전량 리플레이만 하고 BASELINE은 쓰지
+   * 않는다 — baseline 기록은 소유 앱(spot/futures API)의 단독 권한이고, 레플리카가 쓰면 소유
+   * 앱과 이중 기록된다. 이후는 테일러 틱이 소유 앱발 저널을 ≤250ms 랙으로 따라간다.
+   */
+  static forReplica(markets: MarketType[]): DynamicModule {
+    return {
+      module: LedgerModule,
+      providers: [
+        { provide: LEDGER_OWNED_MARKETS, useValue: markets },
+        LedgerReplicaBootstrap,
       ],
     };
   }
