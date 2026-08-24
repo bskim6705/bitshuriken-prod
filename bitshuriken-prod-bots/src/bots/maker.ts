@@ -67,12 +67,16 @@ export class MakerBot {
   private pending = false; // a snapshot arrived since the last pass
   private stopped = false;
   private lastResync = 0;
+  private posQty = 0; // futures position (refreshed on resync) — steers reduceOnly quoting
   private bids = new Map<string, Resting>(); // priceStr -> resting
   private asks = new Map<string, Resting>();
   private readonly log: Logger;
 
-  // per-SIDE resting-notional budget. Futures: 40% of the account maxNotional. Spot: unbounded.
-  // External depth dwarfs the local cap, so without this the maker's futures orders are rejected.
+  // per-SIDE resting-notional budget. Spot: unbounded. Futures: 25% of the per-symbol
+  // maxNotional — the BE counts |position| + open-order remainders + the new order against that
+  // cap, so both sides' books (2×25%) must leave headroom for position drift from taker fills
+  // and for in-flight replacement overlap (a cancel not yet applied while its successor lands).
+  // At 40% the cap rejected most placements and the futures book sat empty.
   private perSideNotional: number;
 
   constructor(
@@ -86,7 +90,7 @@ export class MakerBot {
     private readonly passOpsCap = DEFAULT_PASS_OPS_CAP,
   ) {
     this.log = makeLogger(`maker:${spec.market === 'FUTURES' ? 'F:' : ''}${spec.symbol}`);
-    this.perSideNotional = spec.market === 'FUTURES' ? maxNotional * 0.4 : Infinity;
+    this.perSideNotional = spec.market === 'FUTURES' ? maxNotional * 0.25 : Infinity;
   }
 
   setParams(p: MakerParams): void {
@@ -95,7 +99,7 @@ export class MakerBot {
     if (p.reconcileMs !== undefined) this.reconcileMs = p.reconcileMs;
     if (p.maxNotional !== undefined) {
       this.maxNotional = p.maxNotional;
-      this.perSideNotional = this.spec.market === 'FUTURES' ? this.maxNotional * 0.4 : Infinity;
+      this.perSideNotional = this.spec.market === 'FUTURES' ? this.maxNotional * 0.25 : Infinity;
     }
   }
 
@@ -144,16 +148,30 @@ export class MakerBot {
       if (q <= 0 || !meetsMinNotional(this.spec, pn, q)) continue;
       out.set(p, (out.get(p) ?? 0) + q);
     }
-    return this.fitNotional(out);
+    return this.fitNotional(out, side);
   }
 
+  // sticky per-side notional scale. Recomputing scale=budget/total every pass makes EVERY level's
+  // target qty jitter with the external book's total — all levels then breach qtyTolerance together
+  // and the whole side cancel/replaces every pass (measured: futures orders lived 0.4–0.8s, book
+  // effectively empty). Reuse the last scale while it stays within tolerance and inside 1.25×
+  // budget, so per-level churn is again proportional to per-level change, like spot.
+  private readonly stickyScale: Record<Side, number> = { BUY: 1, SELL: 1 };
+
   /** scale qty down so Σ price·qty ≤ perSideNotional (no-op for spot / already-small books). */
-  private fitNotional(targets: Map<string, number>): Map<string, number> {
+  private fitNotional(targets: Map<string, number>, side: Side): Map<string, number> {
     if (!isFinite(this.perSideNotional)) return targets;
     let total = 0;
     for (const [p, q] of targets) total += Number(p) * q;
-    if (total <= this.perSideNotional) return targets;
-    const scale = this.perSideNotional / total;
+    if (total <= this.perSideNotional && this.stickyScale[side] >= 1) return targets;
+    const fresh = Math.min(1, this.perSideNotional / total);
+    const last = this.stickyScale[side];
+    const scale =
+      Math.abs(fresh / last - 1) <= this.qtyTolerance && last * total <= this.perSideNotional * 1.25
+        ? last
+        : fresh;
+    this.stickyScale[side] = scale;
+    if (scale >= 1) return targets;
     const out = new Map<string, number>();
     for (const [p, q] of targets) {
       const scaled = Number(floorQty(this.spec, q * scale));
@@ -266,6 +284,17 @@ export class MakerBot {
    * adopted here) are cancelled.
    */
   private async resync(): Promise<void> {
+    if (this.spec.market === 'FUTURES') {
+      // position drives reduceOnly quoting (see place()) — refresh it at resync cadence
+      try {
+        const pos = (await this.client.positions(this.spec.symbol)).find(
+          (p) => p.symbol === this.spec.symbol,
+        );
+        this.posQty = pos ? Number(pos.qty) : 0;
+      } catch {
+        /* keep the last known position */
+      }
+    }
     const open = await this.client.openOrders(this.spec.market, this.spec.symbol);
     const next = { BUY: new Map<string, Resting>(), SELL: new Map<string, Resting>() };
     const dupes: string[] = [];
@@ -291,13 +320,29 @@ export class MakerBot {
   ): Promise<void> {
     const qtyStr = floorQty(this.spec, qty);
     try {
-      const order = await this.client.placePostOnly(this.spec, side, price, qtyStr);
+      const order = await this.client.placePostOnly(this.spec, side, price, qtyStr, this.reduceOnlyFor(side, qty, current));
       current.set(price, { id: order.id, qty });
     } catch (e) {
       // expected churn (price-band / insufficient) — log each DISTINCT message once so a
       // systemic rejection (e.g. futures notional cap) is never silently swallowed.
       this.warnOnce(`place:${side}`, (e as Error).message, ` [price=${price} qty=${qtyStr}]`);
     }
+  }
+
+  /**
+   * Flag a futures quote reduceOnly when it reduces the account's position and fits (with the
+   * side's already-resting qty) inside HALF the position. Purpose: a maker pinned at the
+   * direction-blind maxNotional cap (|position|+open+new ≤ cap) can otherwise place NOTHING —
+   * its reducing side must quote cap-exempt so the taker's flatten flow can unwind both
+   * accounts. The 50% clamp keeps concurrent fills from over-reducing through zero.
+   */
+  private reduceOnlyFor(side: Side, qty: number, current: Map<string, Resting>): boolean {
+    if (this.spec.market !== 'FUTURES' || this.posQty === 0) return false;
+    const reduces = this.posQty > 0 ? side === 'SELL' : side === 'BUY';
+    if (!reduces) return false;
+    let resting = 0;
+    for (const r of current.values()) resting += r.qty;
+    return resting + qty <= 0.5 * Math.abs(this.posQty);
   }
 
   private async cancel(id: string): Promise<void> {
@@ -317,16 +362,34 @@ export class MakerBot {
     this.log.warn(`${what} failed`, msg + detail);
   }
 
-  /** cancel everything (shutdown / restart). */
+  /**
+   * Cancel everything (shutdown / restart), VERIFIED against exchange truth. Cancels time out
+   * silently when the BE is backlogged at shutdown — that left ghost books resting on delisted
+   * mirror symbols (measured: 90+ orphans/symbol). So after the sweep, re-read open orders and
+   * retry the leftovers; log loudly if any survive, a real exchange never keeps phantom quotes.
+   */
   async clear(): Promise<void> {
     this.stopped = true;
-    const all = [...this.bids.values(), ...this.asks.values()];
+    const tracked = [...this.bids.values(), ...this.asks.values()];
     this.bids.clear();
     this.asks.clear();
-    await Promise.allSettled(all.map((r) => this.cancel(r.id)));
+    await Promise.allSettled(tracked.map((r) => this.cancel(r.id)));
     if (this.spec.market === 'SPOT') {
       await this.client.cancelAllSpot(this.spec.symbol).catch(() => {});
     }
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await sleep(2000); // cancels are async (BE→engine→consumer) — let them land before verifying
+      try {
+        const open = await this.client.openOrders(this.spec.market, this.spec.symbol);
+        if (open.length === 0) return;
+        this.log.warn(`clear: ${open.length} orders still open — retrying (${attempt}/3)`);
+        await Promise.allSettled(open.map((o) => this.cancel(o.id)));
+      } catch (e) {
+        this.log.warn('clear: verify read failed', (e as Error).message);
+      }
+    }
+    const left = await this.client.openOrders(this.spec.market, this.spec.symbol).catch(() => []);
+    if (left.length > 0) this.log.err(`clear FAILED: ${left.length} ghost orders remain — run npm run sweep`);
   }
 }
 

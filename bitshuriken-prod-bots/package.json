@@ -11,6 +11,7 @@
     "scan": "tsx src/scan.ts",
     "fidelity": "tsx src/fidelity.ts",
     "bench": "tsx src/bench.ts",
+    "sweep": "tsx src/sweep.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

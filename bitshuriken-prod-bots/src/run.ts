@@ -21,6 +21,9 @@ const QUOTE_TARGET: Record<string, number> = {
 const DEFAULT_QUOTE_TARGET = 100_000_000;
 const BASE_TARGET_FLOOR = 100_000; // floor units of each base (cheap/unlisted bases)
 const BASE_NOTIONAL = 2_000_000; // target ~$2M worth of each base, so sub-cent alts get enough units
+// USDTKRW's ask side alone rests millions of USDT on Upbit's top-30 (measured: one 350k level);
+// stable bases need a much deeper inventory than the coin-notional target to mirror it fully.
+const STABLE_BASE_TARGET = 20_000_000;
 const FUTURES_MARGIN = 10_000_000; // 10M USDT kept in the futures wallet of a futures account
 const REFILL_EVERY_MS = 10 * 60_000; // periodic top-up absorbs fee bleed / one-sided fills
 const BOOTSTRAP_CONCURRENCY = 4; // parallel account bootstraps (portal is single-event-loop too)
@@ -35,6 +38,8 @@ const accountEmail = (role: 'maker' | 'taker', spec: SymbolSpec): string =>
 // floor for unlisted bases / lookup failure. KRW-market bases use the USDT price too (value-approx).
 const baseTargetCache = new Map<string, number>();
 async function baseTarget(base: string): Promise<number> {
+  // stable bases (USDT of USDTKRW) have no Binance {base}USDT pair — 1 unit ≈ $1
+  if (base === 'USDT' || base === 'USDC') return STABLE_BASE_TARGET;
   const cached = baseTargetCache.get(base);
   if (cached) return cached;
   let qty = BASE_TARGET_FLOOR;
@@ -205,7 +210,16 @@ async function main(): Promise<void> {
         config.tuning.passOpsCap,
       ),
     );
-    takers.set(key, new TakerBot(taker, spec, config.tuning.takerMaxQtyFrac, config.tuning.takerMaxTps));
+    takers.set(
+      key,
+      new TakerBot(
+        taker,
+        spec,
+        config.tuning.takerMaxQtyFrac,
+        config.tuning.takerMaxTps,
+        spec.market === 'FUTURES' ? config.tuning.futuresMaxNotional : Infinity,
+      ),
+    );
   }
 
   // one feed per (source, market): Binance for USDT/USDC, Upbit for KRW.

@@ -19,6 +19,17 @@ import { makeLogger, type Logger } from '../log';
 const TOUCH_POLL_MS = 250;
 const WARN_EVERY_MS = 60_000; // repeated order-rejection messages re-log once per window
 
+// Futures inventory hygiene. Replay fills accumulate position on BOTH bot accounts (maker and
+// taker hold exact opposite exposure); once |position|·mark reaches the per-symbol maxNotional
+// cap the BE rejects every further quote and the book dies (measured: all four futures accounts
+// pinned at ~1.0M). The taker flattens because its aggressive reduceOnly IOC crosses the MAKER's
+// book — one flow shrinks both accounts symmetrically. (The maker can't flatten itself: its
+// aggressive order would hit its own resting opposite side and the self-trade nets to zero.)
+const INVENTORY_POLL_MS = 2_000;
+const FLATTEN_AT = 0.3; // start flattening above this fraction of maxNotional
+const FLATTEN_TO = 0.15; // ...and aim back down to this fraction
+const FLATTEN_MAX_FRAC = 1.0; // per pass, take at most this fraction of the opposing best level
+
 export class TakerBot {
   private pendingBuy = 0;
   private pendingSell = 0;
@@ -28,7 +39,10 @@ export class TakerBot {
   private asks: Level[] = [];
   private pollTimer: NodeJS.Timeout | null = null;
   private flushTimer: NodeJS.Timeout | null = null;
+  private inventoryTimer: NodeJS.Timeout | null = null;
   private flushing = false;
+  private flattening = false;
+  private posQty = 0; // futures position (refreshed by the inventory loop)
   private readonly lastWarn = new Map<string, number>();
   private readonly log: Logger;
 
@@ -37,6 +51,7 @@ export class TakerBot {
     private readonly spec: SymbolSpec,
     private maxQtyFrac: number,
     private maxTps: number,
+    private readonly maxNotional = Infinity,
   ) {
     this.log = makeLogger(`taker:${spec.market === 'FUTURES' ? 'F:' : ''}${spec.symbol}`);
   }
@@ -77,6 +92,44 @@ export class TakerBot {
     // prices the book has already left (shaved wicks, missed fills).
     this.pollTimer = setInterval(() => void this.poll(), TOUCH_POLL_MS);
     this.flushTimer = setInterval(() => void this.flush(), Math.max(50, 1000 / this.maxTps));
+    if (this.spec.market === 'FUTURES' && isFinite(this.maxNotional)) {
+      this.inventoryTimer = setInterval(() => void this.flattenInventory(), INVENTORY_POLL_MS);
+    }
+  }
+
+  /** shed futures exposure back under FLATTEN_TO×maxNotional once it exceeds FLATTEN_AT×. */
+  private async flattenInventory(): Promise<void> {
+    if (this.flattening) return;
+    this.flattening = true;
+    try {
+      const pos = (await this.client.positions(this.spec.symbol)).find(
+        (p) => p.symbol === this.spec.symbol,
+      );
+      this.posQty = pos ? Number(pos.qty) : 0;
+      if (!pos || this.posQty === 0) return;
+      const qty = this.posQty;
+      const mark = Number(pos.markPrice) || (qty > 0 ? this.bids[0]?.[0] : this.asks[0]?.[0]) || 0;
+      if (mark <= 0 || Math.abs(qty) * mark <= FLATTEN_AT * this.maxNotional) return;
+      const excess = Math.abs(qty) - (FLATTEN_TO * this.maxNotional) / mark;
+      // closing a LONG sells into the bids; closing a SHORT buys from the asks
+      const [side, levels] = qty > 0 ? (['SELL', this.bids] as const) : (['BUY', this.asks] as const);
+      const best = levels[0];
+      if (!best) return;
+      const q = floorQty(this.spec, Math.min(excess, FLATTEN_MAX_FRAC * best[1]));
+      if (Number(q) <= 0) return;
+      const price = side === 'SELL' ? floorPrice(this.spec, best[0]) : ceilPrice(this.spec, best[0]);
+      await this.client.placeReduceOnlyIoc(this.spec.symbol, side, price, q);
+      this.log.info(`inventory flatten: ${side} ${q} @ ${price} (|pos| ${Math.abs(qty).toFixed(4)})`);
+    } catch (e) {
+      const msg = (e as Error).message;
+      const now = Date.now();
+      if (now - (this.lastWarn.get(msg) ?? 0) >= WARN_EVERY_MS) {
+        this.lastWarn.set(msg, now);
+        this.log.warn('inventory flatten failed', msg);
+      }
+    } finally {
+      this.flattening = false;
+    }
   }
 
   private async poll(): Promise<void> {
@@ -93,7 +146,17 @@ export class TakerBot {
     if (this.flushing) return;
     this.flushing = true;
     try {
-      if (this.pendingBuy > 0 && this.asks.length) {
+      // inventory-aware replay: while exposure is past the flatten threshold, pause the side
+      // that would grow it further — otherwise replay adds position as fast as flatten sheds it
+      // and the unwind never converges (measured: ETH pinned around ~880k notional).
+      const bid = this.bids[0]?.[0] ?? 0;
+      const ask = this.asks[0]?.[0] ?? 0;
+      const mark = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid || ask;
+      const overExposed =
+        this.spec.market === 'FUTURES' && Math.abs(this.posQty) * mark > FLATTEN_AT * this.maxNotional;
+      const skipBuy = overExposed && this.posQty > 0;
+      const skipSell = overExposed && this.posQty < 0;
+      if (!skipBuy && this.pendingBuy > 0 && this.asks.length) {
         const cap = Math.max(this.sweepBuy, this.asks[0]![0]);
         const q = this.slice(this.pendingBuy, this.asks, cap, (p) => p <= cap);
         if (q > 0 && (await this.take('BUY', q, ceilPrice(this.spec, cap), cap))) {
@@ -101,7 +164,7 @@ export class TakerBot {
           this.sweepBuy = 0;
         }
       }
-      if (this.pendingSell > 0 && this.bids.length) {
+      if (!skipSell && this.pendingSell > 0 && this.bids.length) {
         const cap = Math.min(this.sweepSell, this.bids[0]![0]);
         const q = this.slice(this.pendingSell, this.bids, cap, (p) => p >= cap);
         if (q > 0 && (await this.take('SELL', q, floorPrice(this.spec, cap), cap))) {
@@ -162,5 +225,6 @@ export class TakerBot {
   stop(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.flushTimer) clearInterval(this.flushTimer);
+    if (this.inventoryTimer) clearInterval(this.inventoryTimer);
   }
 }

@@ -166,8 +166,18 @@ async function main(): Promise<void> {
   const out = argStr('out');
 
   const all = [...(await localSpecs('SPOT')), ...(await localSpecs('FUTURES').catch(() => [] as Spec[]))];
-  const probe = await Promise.all(all.map(async (s) => ((await localTob(s)) ? s : null)));
-  const specs = probe.filter((s): s is Spec => s !== null);
+  // probe with retries — a book momentarily one-sided (mid-walk) must not exclude its symbol
+  // from the whole run; unusable moments are skipped per-tick instead.
+  let candidates = all.map((s) => ({ s, ok: false }));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await Promise.all(
+      candidates.filter((c) => !c.ok).map(async (c) => {
+        c.ok = (await localTob(c.s)) !== null;
+      }),
+    );
+    if (candidates.some((c) => !c.ok)) await new Promise((r) => setTimeout(r, 3000));
+  }
+  const specs = candidates.filter((c) => c.ok).map((c) => c.s);
   if (!specs.length) throw new Error('no symbol has a usable local book — is the mirror running?');
   log.info(
     `sampling ${specs.length} symbols every ${sampleMs}ms for ${minutes}min: ` +

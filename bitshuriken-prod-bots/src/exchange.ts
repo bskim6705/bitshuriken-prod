@@ -248,14 +248,28 @@ export class LocalExchangeClient {
     return this.signed<LocalOrder[]>(apiBase(market), 'GET', path, { query: { symbol } });
   }
 
+  positions(symbol: string): Promise<{ symbol: string; qty: string; markPrice: string | null }[]> {
+    return this.signed(config.api.futures, 'GET', '/futures/account/positions', { query: { symbol } });
+  }
+
   // ---- trading (TRADE scope) ----
   placeLimit(spec: SymbolSpec, side: Side, price: string, qty: string): Promise<LocalOrder> {
     return this.placeResting(spec, 'LIMIT', side, price, qty);
   }
 
-  /** maker-only resting order: the engine rejects it instead of matching if it would cross. */
-  placePostOnly(spec: SymbolSpec, side: Side, price: string, qty: string): Promise<LocalOrder> {
-    return this.placeResting(spec, 'POST_ONLY', side, price, qty);
+  /**
+   * maker-only resting order: the engine rejects it instead of matching if it would cross.
+   * `reduceOnly` (futures only) marks a position-reducing quote — exempt from the maxNotional
+   * cap, so a maker pinned at the cap can still quote its reducing side.
+   */
+  placePostOnly(
+    spec: SymbolSpec,
+    side: Side,
+    price: string,
+    qty: string,
+    reduceOnly = false,
+  ): Promise<LocalOrder> {
+    return this.placeResting(spec, 'POST_ONLY', side, price, qty, reduceOnly);
   }
 
   private placeResting(
@@ -264,6 +278,7 @@ export class LocalExchangeClient {
     side: Side,
     price: string,
     qty: string,
+    reduceOnly = false,
   ): Promise<LocalOrder> {
     if (spec.market === 'SPOT') {
       return this.signed<LocalOrder>(config.api.spot, 'POST', '/spot/trading/orders', {
@@ -279,7 +294,7 @@ export class LocalExchangeClient {
       });
     }
     return this.signed<LocalOrder>(config.api.futures, 'POST', '/futures/trading/orders', {
-      body: { symbol: spec.symbol, type, side, timeInForce: 'GTC', price, qty },
+      body: { symbol: spec.symbol, type, side, timeInForce: 'GTC', price, qty, ...(reduceOnly ? { reduceOnly: true } : {}) },
     });
   }
 
@@ -318,6 +333,16 @@ export class LocalExchangeClient {
     }
     return this.signed<LocalOrder>(config.api.futures, 'POST', '/futures/trading/orders', {
       body: { symbol: spec.symbol, type: 'LIMIT', side, timeInForce: 'IOC', price, qty },
+    });
+  }
+
+  /**
+   * Futures inventory flatten: reduceOnly LIMIT IOC. Exempt from the maxNotional cap (it only
+   * shrinks exposure), fills against whatever rests at/inside `price`, expires the rest.
+   */
+  placeReduceOnlyIoc(symbol: string, side: Side, price: string, qty: string): Promise<LocalOrder> {
+    return this.signed<LocalOrder>(config.api.futures, 'POST', '/futures/trading/orders', {
+      body: { symbol, type: 'LIMIT', side, timeInForce: 'IOC', price, qty, reduceOnly: true },
     });
   }
 
