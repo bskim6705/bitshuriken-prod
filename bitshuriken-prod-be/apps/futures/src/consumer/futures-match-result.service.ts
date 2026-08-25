@@ -56,8 +56,8 @@ export class FuturesMatchResultService {
     }
 
     const [makerRates, takerRates] = await Promise.all([
-      this.users.feeRatesOf(trade.makerUserId),
-      this.users.feeRatesOf(trade.takerUserId),
+      this.users.feeRatesOf(trade.makerUserId, MarketType.FUTURES),
+      this.users.feeRatesOf(trade.takerUserId, MarketType.FUTURES),
     ]);
 
     // 수수료 = notional×bps, USDT 차감(ceil) — worker feeOf와 동일 라운딩

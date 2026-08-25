@@ -223,7 +223,7 @@ export class FuturesTradingService {
         newNotional: estNotional,
         maxNotional: config.maxNotional,
       });
-      const { takerBps } = await this.users.feeRatesOf(userId);
+      const { takerBps } = await this.users.feeRatesOf(userId, MarketType.FUTURES);
       cost = this.margin.costOf({
         side: dto.side,
         admissionPrice,

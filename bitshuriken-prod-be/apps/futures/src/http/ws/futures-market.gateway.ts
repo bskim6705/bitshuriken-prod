@@ -13,6 +13,8 @@ import { PrismaService } from '@app/infra/prisma/prisma.service';
 import { fmtScaled } from '@app/shared/decimal';
 import {
   ALL_TICKERS_STREAM,
+  DEPTH_DIFF_SUFFIX,
+  DepthDiffEvent,
   TRADE_SNAPSHOT_LIMIT,
   WsMarketGatewayBase,
 } from '@app/shared/ws/market-gateway.base';
@@ -20,7 +22,15 @@ import { MarkPriceEvent, MarkPriceService } from '../../mark-price/mark-price.se
 
 type ParsedStream =
   | {
-      kind: 'depth' | 'trade' | 'ticker' | 'markPrice' | 'miniTicker' | 'bookTicker' | 'aggTrade';
+      kind:
+        | 'depth'
+        | 'depthDiff'
+        | 'trade'
+        | 'ticker'
+        | 'markPrice'
+        | 'miniTicker'
+        | 'bookTicker'
+        | 'aggTrade';
       symbol: string;
     }
   | { kind: 'kline'; symbol: string; interval: KlineInterval }
@@ -119,10 +129,12 @@ export class WsFuturesMarketGateway extends WsMarketGatewayBase {
 
   // ---- broadcast ----
 
-  /** DPD 수신 시 현재 full snapshot push (spot과 동일한 Phase 1 단순화). */
-  onDepthDiff(market: MarketType, symbol: string): void {
+  /** `@depth`는 full snapshot push, `@depth@100ms`는 U/u/pu diff 스트림 (spot과 동일). */
+  onDepthDiff(market: MarketType, symbol: string, diff: DepthDiffEvent): void {
     if (market !== MARKET) return;
     const lower = symbol.toLowerCase();
+
+    this.bufferDepthDiff(symbol, diff);
 
     const depthStream = `${lower}@depth`;
     if (this.clientsByStream.get(depthStream)?.size) {
@@ -323,6 +335,8 @@ export class WsFuturesMarketGateway extends WsMarketGatewayBase {
 
     if (parsed.kind === 'depth') {
       this.send(client, { stream, data: this.formattedDepth(parsed.symbol) });
+    } else if (parsed.kind === 'depthDiff') {
+      // diff 스트림은 스냅샷 없음 — 클라이언트가 REST /depth(lastUpdateId)로 동기화
     } else if (parsed.kind === 'trade') {
       const meta = this.tickerStats.metaOf(MARKET, parsed.symbol);
       if (!meta) return;
@@ -467,6 +481,7 @@ function parseStream(stream: string): ParsedStream | null {
   if (rawSym !== rawSym.toLowerCase()) return null;
   const sym = rawSym.toUpperCase();
   const kind = stream.slice(at + 1);
+  if (kind === DEPTH_DIFF_SUFFIX) return { kind: 'depthDiff', symbol: sym };
   if (kind.startsWith('kline_')) {
     const interval = kind.slice('kline_'.length);
     if (!isKlineInterval(interval)) return null;

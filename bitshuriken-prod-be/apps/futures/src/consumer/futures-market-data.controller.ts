@@ -20,7 +20,7 @@ export class FuturesMarketDataController {
     if (payload.op === Op.DEPTH_DIFF) {
       const diff = parseDepthDiffMsg(payload);
       this.obCache.applyDiff(MARKET, diff);
-      this.gateway.onDepthDiff(MARKET, diff.symbol);
+      this.gateway.onDepthDiff(MARKET, diff.symbol, diff);
     }
   }
 }

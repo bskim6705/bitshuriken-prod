@@ -43,8 +43,11 @@ model User {
   twoFactorEnabled Boolean @default(false)
   twoFactorSecret  String? // AES-256-GCM 암호문. setup 시 저장, enable 전까지 보류분
   // 거래 수수료 (basis points, 10 = 0.1%). 유효범위 [0, 10000) — 조회 시 검증.
+  // deprecated 표시 전용 — 정산은 feeTier를 읽는다 (ADR-073)
   feeMakerBps    Int      @default(10)
   feeTakerBps    Int      @default(10)
+  // 수수료 티어 — admin 수동 지정, 요율은 코드 테이블(fee-tiers.ts)이 정본
+  feeTier        Int      @default(0)
   role           UserRole @default(USER)
   // 계정 제한 — admin이 개별 토글(false = 해당 행위 차단). 기본 전부 허용.
   loginEnabled      Boolean @default(true)
@@ -401,6 +404,8 @@ model SettlementEvent {
   appliedAt DateTime?
 
   @@index([status, createdAt])
+  // futures worker 폴(WHERE status ORDER BY seq LIMIT n, 10Hz)이 정렬 없이 인덱스 순서로 읽도록
+  @@index([status, seq])
 }
 
 // 정산 DLQ — 연속 실패로 격리된 이벤트의 자기완결 사본 (원본 SettlementEvent는 QUARANTINED로 남음).

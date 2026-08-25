@@ -126,7 +126,7 @@ export class FuturesTriggerService implements OnApplicationBootstrap, OnModuleDe
         }
         throw e;
       }
-      const { takerBps } = await this.users.feeRatesOf(order.userId);
+      const { takerBps } = await this.users.feeRatesOf(order.userId, MarketType.FUTURES);
       cost = this.margin.costOf({
         side: order.side,
         admissionPrice,

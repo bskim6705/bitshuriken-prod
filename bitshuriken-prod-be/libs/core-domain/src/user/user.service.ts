@@ -1,8 +1,9 @@
 import { Injectable, HttpStatus } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
+import { MarketType, UserRole } from '@prisma/client';
 import { PrismaService } from '@app/infra/prisma/prisma.service';
 import { DomainException } from '@app/shared/exceptions/domain.exception';
 import { ErrorCode } from '@app/shared/constants/error-codes';
+import { feeTierRates } from '@app/shared/constants/fee-tiers';
 import { TtlLruCache } from '../cache/ttl-lru-cache';
 
 const FEE_CACHE_TTL_MS = 60_000;
@@ -13,11 +14,13 @@ const AUTH_CTX_CACHE_TTL_MS = 5_000;
 const AUTH_CTX_CACHE_MAX = 10_000;
 
 export interface FeeRates {
+  tier: number;
   makerBps: number;
   takerBps: number;
 }
 
-interface FeeCacheEntry extends FeeRates {
+interface FeeCacheEntry {
+  tier: number;
   expiresAt: number;
 }
 
@@ -71,36 +74,32 @@ export class UserService {
     });
   }
 
-  /** 수수료 요율 조회 (60s TTL 캐시). 유저 없음/범위 위반은 throw — 기본값 대체 금지. */
-  async feeRatesOf(userId: string): Promise<FeeRates> {
+  /**
+   * 수수료 요율 조회 — feeTier → 코드 테이블(fee-tiers.ts)의 마켓별 요율 (ADR-073).
+   * tier만 60s TTL 캐시. 유저 없음/범위 밖 tier는 throw — 기본값 대체 금지.
+   */
+  async feeRatesOf(userId: string, market: MarketType): Promise<FeeRates> {
     const cached = this.feeCache.get(userId);
+    let tier: number;
     if (cached && cached.expiresAt > Date.now()) {
-      return { makerBps: cached.makerBps, takerBps: cached.takerBps };
+      tier = cached.tier;
+    } else {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { feeTier: true },
+      });
+      if (!user)
+        throw new DomainException(
+          ErrorCode.USER_NOT_FOUND,
+          `User ${userId} not found`,
+          HttpStatus.NOT_FOUND,
+        );
+      tier = user.feeTier;
+      this.feeCache.set(userId, { tier, expiresAt: Date.now() + FEE_CACHE_TTL_MS });
     }
 
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { feeMakerBps: true, feeTakerBps: true },
-    });
-    if (!user)
-      throw new DomainException(
-        ErrorCode.USER_NOT_FOUND,
-        `User ${userId} not found`,
-        HttpStatus.NOT_FOUND,
-      );
-
-    for (const [field, bps] of [
-      ['feeMakerBps', user.feeMakerBps],
-      ['feeTakerBps', user.feeTakerBps],
-    ] as const) {
-      if (!Number.isInteger(bps) || bps < 0 || bps >= 10000) {
-        throw new Error(`User ${userId} has invalid ${field}=${bps} (must be in [0, 10000))`);
-      }
-    }
-
-    const rates: FeeRates = { makerBps: user.feeMakerBps, takerBps: user.feeTakerBps };
-    this.feeCache.set(userId, { ...rates, expiresAt: Date.now() + FEE_CACHE_TTL_MS });
-    return rates;
+    const { makerBps, takerBps } = feeTierRates(tier, market);
+    return { tier, makerBps, takerBps };
   }
 
   /**

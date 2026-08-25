@@ -16,6 +16,7 @@ import { ErrorCode } from '@app/shared/constants/error-codes';
 import { TwoFactorService } from '@app/core-domain/two-factor/two-factor.service';
 import { AdjustBalanceDto } from './dto/adjust-balance.dto';
 import { UpdateFeeDto } from './dto/update-fee.dto';
+import { UpdateFeeTierDto } from './dto/update-fee-tier.dto';
 import { SetRoleDto } from './dto/set-role.dto';
 import { SetRestrictionsDto } from './dto/set-restrictions.dto';
 
@@ -74,6 +75,7 @@ export class AdminService {
           withdrawalEnabled: true,
           feeMakerBps: true,
           feeTakerBps: true,
+          feeTier: true,
           createdAt: true,
           _count: { select: { orders: true, apiKeys: true, positions: true } },
         },
@@ -94,6 +96,7 @@ export class AdminService {
         restricted: !(u.loginEnabled && u.tradingEnabled && u.withdrawalEnabled),
         feeMakerBps: u.feeMakerBps,
         feeTakerBps: u.feeTakerBps,
+        feeTier: u.feeTier,
         orderCount: u._count.orders,
         apiKeyCount: u._count.apiKeys,
         positionCount: u._count.positions,
@@ -117,6 +120,7 @@ export class AdminService {
         withdrawalEnabled: true,
         feeMakerBps: true,
         feeTakerBps: true,
+        feeTier: true,
         createdAt: true,
       },
     });
@@ -304,7 +308,7 @@ export class AdminService {
     };
   }
 
-  /** per-user 수수료 오버라이드. 범위([0,9999])는 DTO 검증. 60s 캐시로 전파(즉시 아님). */
+  /** deprecated — 레거시 bps 컬럼(표시 전용) 수정. 정산은 feeTier 기준 (ADR-073). */
   async updateFee(adminId: string, targetUserId: string, dto: UpdateFeeDto) {
     await this.twoFactor.assertSatisfied(adminId, dto.totpCode);
     await this.assertUserExists(targetUserId);
@@ -314,6 +318,18 @@ export class AdminService {
       select: { id: true, feeMakerBps: true, feeTakerBps: true },
     });
     return { userId: user.id, feeMakerBps: user.feeMakerBps, feeTakerBps: user.feeTakerBps };
+  }
+
+  /** 수수료 티어 지정 — 요율은 코드 테이블(fee-tiers.ts). 범위는 DTO 검증, 전파 ≤60s 캐시. */
+  async updateFeeTier(adminId: string, targetUserId: string, dto: UpdateFeeTierDto) {
+    await this.twoFactor.assertSatisfied(adminId, dto.totpCode);
+    await this.assertUserExists(targetUserId);
+    const user = await this.prisma.user.update({
+      where: { id: targetUserId },
+      data: { feeTier: dto.feeTier },
+      select: { id: true, feeTier: true },
+    });
+    return { userId: user.id, feeTier: user.feeTier };
   }
 
   /** API key soft-delete(revokedAt). 멱등. secret은 노출하지 않음. */

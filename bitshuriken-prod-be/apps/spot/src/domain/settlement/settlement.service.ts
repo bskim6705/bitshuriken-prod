@@ -42,8 +42,8 @@ export class SettlementService {
     const isTakerBuy = params.takerSide === 'BUY';
 
     const [makerRates, takerRates] = await Promise.all([
-      this.users.feeRatesOf(params.makerUserId),
-      this.users.feeRatesOf(params.takerUserId),
+      this.users.feeRatesOf(params.makerUserId, params.market),
+      this.users.feeRatesOf(params.takerUserId, params.market),
     ]);
 
     // commission 자산 = 그 당사자가 수령하는 자산 (BUY → base, SELL → quote)

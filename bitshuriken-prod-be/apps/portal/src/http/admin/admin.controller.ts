@@ -20,6 +20,7 @@ import { Roles } from '@app/shared/decorators/roles.decorator';
 import { AdminService } from './admin.service';
 import { AdjustBalanceDto } from './dto/adjust-balance.dto';
 import { UpdateFeeDto } from './dto/update-fee.dto';
+import { UpdateFeeTierDto } from './dto/update-fee-tier.dto';
 import { StepUpDto } from './dto/step-up.dto';
 import { SetRoleDto } from './dto/set-role.dto';
 import { SetRestrictionsDto } from './dto/set-restrictions.dto';
@@ -66,6 +67,7 @@ export class AdminController {
     return this.adminService.adjustBalance(admin.userId, userId, dto, 'debit');
   }
 
+  // deprecated — 레거시 bps 컬럼(표시 전용) 수정. 정산은 feeTier를 읽는다 → fee-tier 사용.
   @Patch('users/:userId/fee')
   updateFee(
     @CurrentUser() admin: CurrentUserPayload,
@@ -73,6 +75,15 @@ export class AdminController {
     @Body() dto: UpdateFeeDto,
   ) {
     return this.adminService.updateFee(admin.userId, userId, dto);
+  }
+
+  @Patch('users/:userId/fee-tier')
+  updateFeeTier(
+    @CurrentUser() admin: CurrentUserPayload,
+    @Param('userId') userId: string,
+    @Body() dto: UpdateFeeTierDto,
+  ) {
+    return this.adminService.updateFeeTier(admin.userId, userId, dto);
   }
 
   @Post('api-keys/:apiKeyId/revoke')

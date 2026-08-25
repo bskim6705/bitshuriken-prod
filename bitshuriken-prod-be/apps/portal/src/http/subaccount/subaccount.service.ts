@@ -75,8 +75,16 @@ export class SubaccountService {
         parentUserId: masterUserId,
         feeMakerBps: master.feeMakerBps,
         feeTakerBps: master.feeTakerBps,
+        feeTier: master.feeTier,
       },
-      select: { id: true, displayName: true, feeMakerBps: true, feeTakerBps: true, createdAt: true },
+      select: {
+        id: true,
+        displayName: true,
+        feeMakerBps: true,
+        feeTakerBps: true,
+        feeTier: true,
+        createdAt: true,
+      },
     });
 
     return {
@@ -84,6 +92,7 @@ export class SubaccountService {
       label: sub.displayName,
       feeMakerBps: sub.feeMakerBps,
       feeTakerBps: sub.feeTakerBps,
+      feeTier: sub.feeTier,
       createdAt: sub.createdAt,
     };
   }
@@ -93,13 +102,21 @@ export class SubaccountService {
     const subs = await this.prisma.user.findMany({
       where: { parentUserId: masterUserId },
       orderBy: { createdAt: 'desc' },
-      select: { id: true, displayName: true, feeMakerBps: true, feeTakerBps: true, createdAt: true },
+      select: {
+        id: true,
+        displayName: true,
+        feeMakerBps: true,
+        feeTakerBps: true,
+        feeTier: true,
+        createdAt: true,
+      },
     });
     return subs.map((s) => ({
       id: s.id,
       label: s.displayName,
       feeMakerBps: s.feeMakerBps,
       feeTakerBps: s.feeTakerBps,
+      feeTier: s.feeTier,
       createdAt: s.createdAt,
     }));
   }
@@ -269,7 +286,7 @@ export class SubaccountService {
   private async assertMaster(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, parentUserId: true, feeMakerBps: true, feeTakerBps: true },
+      select: { id: true, parentUserId: true, feeMakerBps: true, feeTakerBps: true, feeTier: true },
     });
     if (!user) {
       throw new DomainException(ErrorCode.USER_NOT_FOUND, 'User not found', HttpStatus.NOT_FOUND);

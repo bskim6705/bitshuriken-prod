@@ -70,7 +70,7 @@ export class AccountController {
   async snapshot(@CurrentUser() user: CurrentUserPayload) {
     const [wallets, rates] = await Promise.all([
       this.walletService.findByUser(user.userId),
-      this.userService.feeRatesOf(user.userId),
+      this.userService.feeRatesOf(user.userId, MarketType.SPOT),
     ]);
     const spotWallets = wallets.filter((w) => w.marketType === MarketType.SPOT);
     const balances = spotWallets.map((w) => ({
@@ -272,8 +272,9 @@ export class AccountController {
   @Get('commission')
   @ApiOperation({ summary: 'Commission rates (bps + decimal rate string)' })
   async commission(@CurrentUser() user: CurrentUserPayload) {
-    const rates = await this.userService.feeRatesOf(user.userId);
+    const rates = await this.userService.feeRatesOf(user.userId, MarketType.SPOT);
     return {
+      feeTier: rates.tier,
       makerBps: rates.makerBps,
       takerBps: rates.takerBps,
       maker: new Decimal(rates.makerBps).div(10000).toFixed(8),

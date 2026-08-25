@@ -280,9 +280,10 @@ export class FuturesAccountService {
 
   /** 요청 유저의 수수료 요율(심볼 무관 동일 tier). bps → 8dp 소수 rate. */
   async commissionRate(userId: string, symbol: string) {
-    const { makerBps, takerBps } = await this.users.feeRatesOf(userId);
+    const { tier, makerBps, takerBps } = await this.users.feeRatesOf(userId, MarketType.FUTURES);
     return {
       symbol,
+      feeTier: tier,
       makerCommissionRate: this.bpsToRate(makerBps),
       takerCommissionRate: this.bpsToRate(takerBps),
     };

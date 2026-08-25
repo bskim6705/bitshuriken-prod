@@ -25,10 +25,11 @@ async function bootstrap() {
       client: { clientId: 'bitshuriken-settle', brokers: [broker] },
       consumer: { groupId: 'bitshuriken-settle' },
       run: {
-        partitionsConsumedConcurrently: Math.max(
-          matchPartitionCount('SPOT'),
-          matchPartitionCount('FUTURES'),
-        ),
+        // 이 컨슈머는 spot+futures의 out 토픽을 모두 구독한다 — kafkajs의 이 값은 토픽별이
+        // 아니라 전체 할당 기준이므로 두 마켓 파티션 수의 "합"이어야 파티션당 1:1 동시성이 된다
+        // (max였을 때 절반 스로틀 → OU ack 분 단위 랙 실측).
+        partitionsConsumedConcurrently:
+          matchPartitionCount('SPOT') + matchPartitionCount('FUTURES'),
       },
     },
   });
