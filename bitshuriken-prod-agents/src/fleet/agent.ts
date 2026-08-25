@@ -39,6 +39,7 @@ export class AgentRunner {
     const history = await klines(this.spec.market, this.spec.symbol, this.record.interval, this.strategy.warmupBars + 2);
     this.strategy.warmup(history.filter((b) => b.isFinal));
     if (this.strategy.onFill) this.broker.onFill((f) => this.strategy.onFill!(f));
+    await this.broker.connectUserStream(); // 체결 푸시 (실패 시 내부적으로 폴링만으로 후퇴)
     this.unsub = this.clock.onBar((bar) => {
       this.inFlight = this.onBar(bar);
     });
@@ -78,6 +79,7 @@ export class AgentRunner {
   async stop(flatten: boolean): Promise<void> {
     this.unsub?.();
     this.unsub = null;
+    this.broker.dispose();
     await this.inFlight?.catch(() => {}); // let an in-flight bar finish before flattening
     if (flatten) {
       await this.client.cancelAll(this.spec.market, this.spec.symbol).catch(() => {});

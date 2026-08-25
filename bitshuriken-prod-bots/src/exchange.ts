@@ -227,14 +227,14 @@ export class LocalExchangeClient {
 
   async depth(market: Market, symbol: string, limit = 50): Promise<DepthSnapshot> {
     const path = market === 'SPOT' ? '/spot/market/depth' : '/futures/market/depth';
-    const { data } = await this.raw<{ bids: [string, string][]; asks: [string, string][] }>(
-      apiBase(market),
-      'GET',
-      `${path}?symbol=${symbol}&limit=${limit}`,
-    );
+    const { data } = await this.raw<{
+      lastUpdateId: number;
+      bids: [string, string][];
+      asks: [string, string][];
+    }>(apiBase(market), 'GET', `${path}?symbol=${symbol}&limit=${limit}`);
     const map = (l: [string, string][]): [number, number][] =>
       l.map(([p, q]) => [Number(p), Number(q)]);
-    return { bids: map(data.bids), asks: map(data.asks) };
+    return { bids: map(data.bids), asks: map(data.asks), lastUpdateId: data.lastUpdateId };
   }
 
   // ---- account (READ scope) ----
@@ -250,6 +250,23 @@ export class LocalExchangeClient {
 
   positions(symbol: string): Promise<{ symbol: string; qty: string; markPrice: string | null }[]> {
     return this.signed(config.api.futures, 'GET', '/futures/account/positions', { query: { symbol } });
+  }
+
+  // ---- user data stream (READ scope) ----
+  private listenKeyPath(market: Market): string {
+    return market === 'SPOT' ? '/spot/user-data-stream' : '/futures/account/user-data-stream';
+  }
+
+  createListenKey(market: Market): Promise<string> {
+    return this.signed<{ listenKey: string }>(
+      apiBase(market),
+      'POST',
+      this.listenKeyPath(market),
+    ).then((d) => d.listenKey);
+  }
+
+  keepaliveListenKey(market: Market, listenKey: string): Promise<unknown> {
+    return this.signed(apiBase(market), 'PUT', this.listenKeyPath(market), { query: { listenKey } });
   }
 
   // ---- trading (TRADE scope) ----

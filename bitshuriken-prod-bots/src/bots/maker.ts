@@ -1,7 +1,11 @@
 import type { LocalExchangeClient } from '../exchange';
 import { floorQty, meetsMinNotional, snapPrice, toFixedStr } from '../precision';
 import type { DepthSnapshot, Level, Side, SymbolSpec } from '../types';
+import type { ExecutionReport } from '../user-stream';
+import type { MarketStream } from '../market-stream';
 import { makeLogger, type Logger } from '../log';
+
+const TERMINAL_STATUSES = new Set(['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED']);
 
 interface Resting {
   id: string;
@@ -47,9 +51,11 @@ export interface MakerParams {
  * of matching it against our own stale opposite side. A rejected level simply reappears in
  * a later diff once the stale order is gone.
  *
- * A slow resync loop re-reads open orders to learn what the diff loop can't see: partial
- * fills by the taker (remaining qty drops → topped up via the qty tolerance), async
- * POST_ONLY rejects, and any leaked/duplicate orders from lost responses.
+ * Order-state freshness is push-first: the user data stream delivers executionReports
+ * (fills, cancels, async POST_ONLY rejects) which are queued and applied at the top of
+ * each loop pass — the resting maps stay near-real-time without polling. A slow resync
+ * loop remains as the safety net (stream gaps, leaked/duplicate orders from lost
+ * responses) and as the periodic position re-read.
  */
 // Re-log window for repeated rejections: each distinct message logs at most once per window,
 // per bot instance (per symbol). A persistent systemic failure (balance exhausted, band reject)
@@ -88,6 +94,7 @@ export class MakerBot {
     private qtyTolerance = 0.2,
     private readonly resyncMs = 5_000,
     private readonly passOpsCap = DEFAULT_PASS_OPS_CAP,
+    private readonly mstream?: MarketStream,
   ) {
     this.log = makeLogger(`maker:${spec.market === 'FUTURES' ? 'F:' : ''}${spec.symbol}`);
     this.perSideNotional = spec.market === 'FUTURES' ? maxNotional * 0.25 : Infinity;
@@ -112,6 +119,32 @@ export class MakerBot {
     this.pending = true;
   };
 
+  // user stream 콜백 — 큐잉만 하고 적용은 루프가 한다 (resting 맵 단일 라이터 유지)
+  private readonly reports: ExecutionReport[] = [];
+  onExecutionReport = (r: ExecutionReport): void => {
+    if (r.symbol === this.spec.symbol) this.reports.push(r);
+  };
+
+  /** 큐의 executionReport를 resting 맵과 posQty에 반영. 모르는 주문 id는 resync 소관. */
+  private applyReports(): void {
+    if (this.reports.length === 0) return;
+    for (const r of this.reports.splice(0)) {
+      if (this.spec.market === 'FUTURES' && r.lastFilledQty) {
+        this.posQty += (r.side === 'BUY' ? 1 : -1) * Number(r.lastFilledQty);
+      }
+      const m = r.side === 'BUY' ? this.bids : this.asks;
+      for (const [price, resting] of m) {
+        if (resting.id !== r.orderId) continue;
+        const remaining =
+          r.origQty != null ? Number(r.origQty) - Number(r.executedQty) : resting.qty;
+        if (TERMINAL_STATUSES.has(r.status) || remaining <= 0) m.delete(price);
+        else resting.qty = remaining;
+        break;
+      }
+    }
+    this.pending = true; // 비워진 레벨은 다음 pass에서 재미러링
+  }
+
   start(): void {
     void this.loop();
   }
@@ -122,6 +155,7 @@ export class MakerBot {
     while (!this.stopped) {
       const started = Date.now();
       try {
+        this.applyReports();
         if (started - this.lastResync >= this.resyncMs) {
           this.lastResync = started;
           await this.resync();
@@ -186,14 +220,21 @@ export class MakerBot {
 
     // engine-truth touch — sees resting orders our own maps can't: FOREIGN orders (another
     // user's stray quote) and our own opposite orders whose cancel hasn't applied yet.
+    // 1차 소스는 diff 스트림의 로컬 북(REST 왕복 0·100ms 신선도), 공백 시 REST 후퇴.
     let touchBid: number | null = null;
     let touchAsk: number | null = null;
-    try {
-      const top = await this.client.depth(this.spec.market, this.spec.symbol, 1);
-      touchBid = top.bids[0]?.[0] ?? null;
-      touchAsk = top.asks[0]?.[0] ?? null;
-    } catch {
-      /* transient — the own-map guards below still apply */
+    const local = this.mstream?.book(this.spec.symbol, 1);
+    if (local) {
+      touchBid = local.bids[0]?.[0] ?? null;
+      touchAsk = local.asks[0]?.[0] ?? null;
+    } else {
+      try {
+        const top = await this.client.depth(this.spec.market, this.spec.symbol, 1);
+        touchBid = top.bids[0]?.[0] ?? null;
+        touchAsk = top.asks[0]?.[0] ?? null;
+      } catch {
+        /* transient — the own-map guards below still apply */
+      }
     }
 
     // A FOREIGN order resting inside our target range POST_ONLY-rejects every quote past it

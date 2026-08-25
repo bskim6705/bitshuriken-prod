@@ -1,6 +1,7 @@
 import { ApiError, type LocalExchangeClient } from '../exchange';
 import { ceilPrice, floorPrice, floorQty, meetsMinNotional } from '../precision';
 import type { AggTrade, Level, SymbolSpec } from '../types';
+import type { MarketStream } from '../market-stream';
 import { makeLogger, type Logger } from '../log';
 
 /**
@@ -52,6 +53,7 @@ export class TakerBot {
     private maxQtyFrac: number,
     private maxTps: number,
     private readonly maxNotional = Infinity,
+    private readonly mstream?: MarketStream,
   ) {
     this.log = makeLogger(`taker:${spec.market === 'FUTURES' ? 'F:' : ''}${spec.symbol}`);
   }
@@ -133,6 +135,13 @@ export class TakerBot {
   }
 
   private async poll(): Promise<void> {
+    // 1차 소스는 diff 스트림의 로컬 북(REST 왕복 0), 미동기·수신 공백이면 REST 후퇴
+    const local = this.mstream?.book(this.spec.symbol, 5);
+    if (local) {
+      this.bids = local.bids;
+      this.asks = local.asks;
+      return;
+    }
     try {
       const d = await this.client.depth(this.spec.market, this.spec.symbol, 5);
       this.bids = d.bids;

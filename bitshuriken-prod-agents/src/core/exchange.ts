@@ -319,12 +319,19 @@ export class SubaccountClient {
   }
 
   // ---- trading (signed) ----
-  placeLimit(spec: SymbolSpec, side: Side, price: string, qty: string): Promise<LocalOrder> {
+  /** resting GTC order. type='POST_ONLY' → maker-only (즉시 크로스면 엔진이 거절). */
+  placeLimit(
+    spec: SymbolSpec,
+    side: Side,
+    price: string,
+    qty: string,
+    type: 'LIMIT' | 'POST_ONLY' = 'LIMIT',
+  ): Promise<LocalOrder> {
     if (spec.market === 'SPOT') {
       return this.signed<LocalOrder>(config.api.spot, 'POST', '/spot/trading/orders', {}, {
         tickerSymbol: spec.symbol,
         tickerMarket: 'SPOT',
-        type: 'LIMIT',
+        type,
         side,
         timeInForce: 'GTC',
         price,
@@ -333,12 +340,27 @@ export class SubaccountClient {
     }
     return this.signed<LocalOrder>(config.api.futures, 'POST', '/futures/trading/orders', {}, {
       symbol: spec.symbol,
-      type: 'LIMIT',
+      type,
       side,
       timeInForce: 'GTC',
       price,
       qty,
     });
+  }
+
+  // ---- user data stream (listenKey) ----
+  private listenKeyPath(market: Market): string {
+    return market === 'SPOT' ? '/spot/user-data-stream' : '/futures/account/user-data-stream';
+  }
+
+  createListenKey(market: Market): Promise<string> {
+    return this.signed<{ listenKey: string }>(apiBase(market), 'POST', this.listenKeyPath(market)).then(
+      (d) => d.listenKey,
+    );
+  }
+
+  keepaliveListenKey(market: Market, listenKey: string): Promise<unknown> {
+    return this.signed(apiBase(market), 'PUT', this.listenKeyPath(market), { listenKey });
   }
 
   /** market taker order. SPOT BUY uses quote qty; everything else uses base qty. */

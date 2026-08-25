@@ -49,7 +49,7 @@ export const config = {
   tuning: {
     depthLevels: num('DEPTH_LEVELS', 50), // deep buffer: a fast move can churn the whole visible top-20
     reconcileMs: num('RECONCILE_MS', 250), // maker pass pacing (min gap between diff passes)
-    resyncMs: num('RESYNC_MS', 5_000), // maker open-orders resync cadence (also clears PO-reject phantoms)
+    resyncMs: num('RESYNC_MS', 30_000), // maker open-orders resync — user stream이 1차 소스라 안전망 캐덴스
     qtyTolerance: num('QTY_TOLERANCE', 0.2),
     passOpsCap: num('MAKER_PASS_OPS_CAP', 15), // max levels touched per side per maker pass (feedback-027 walk)
     takerMaxQtyFrac: num('TAKER_MAX_QTY_FRAC', 0.6),

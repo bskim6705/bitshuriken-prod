@@ -11,6 +11,7 @@ export interface SimConfig {
 }
 
 interface DueMarket {
+  id: string;
   fillIndex: number;
   side: 'BUY' | 'SELL';
   /** base qty (for MARKET/FLATTEN) or null when sized from quote at fill time. */
@@ -69,27 +70,39 @@ export class SimBroker implements ExecutionContext {
     this.fillCb = cb;
   }
 
-  submit(intent: OrderIntent): Promise<void> {
+  submit(intent: OrderIntent): Promise<string | null> {
     const fillIndex = this.index + Math.max(1, this.cfg.latencyBars);
     switch (intent.kind) {
-      case 'MARKET':
-        this.dueMarkets.push({ fillIndex, side: intent.side, qty: intent.qty, quoteQty: null });
-        break;
-      case 'MARKET_QUOTE':
-        this.dueMarkets.push({ fillIndex, side: intent.side, qty: null, quoteQty: intent.quoteQty });
-        break;
+      case 'MARKET': {
+        const id = `M${++this.seq}`;
+        this.dueMarkets.push({ id, fillIndex, side: intent.side, qty: intent.qty, quoteQty: null });
+        return Promise.resolve(id);
+      }
+      case 'MARKET_QUOTE': {
+        const id = `M${++this.seq}`;
+        this.dueMarkets.push({ id, fillIndex, side: intent.side, qty: null, quoteQty: intent.quoteQty });
+        return Promise.resolve(id);
+      }
       case 'FLATTEN':
-        if (this.pos.qty > 0) this.dueMarkets.push({ fillIndex, side: 'SELL', qty: this.pos.qty, quoteQty: null });
-        else if (this.pos.qty < 0) this.dueMarkets.push({ fillIndex, side: 'BUY', qty: -this.pos.qty, quoteQty: null });
-        break;
-      case 'LIMIT':
-        this.restingLimits.push({ id: `L${++this.seq}`, side: intent.side, price: intent.price, qty: intent.qty });
-        break;
+        if (this.pos.qty > 0)
+          this.dueMarkets.push({ id: `M${++this.seq}`, fillIndex, side: 'SELL', qty: this.pos.qty, quoteQty: null });
+        else if (this.pos.qty < 0)
+          this.dueMarkets.push({ id: `M${++this.seq}`, fillIndex, side: 'BUY', qty: -this.pos.qty, quoteQty: null });
+        return Promise.resolve(null);
+      case 'LIMIT': {
+        // postOnly: 현재 mark를 즉시 크로스하는 가격이면 거래소의 POST_ONLY 거절을 모사
+        if (intent.postOnly === true && this.mark > 0) {
+          const crosses = intent.side === 'BUY' ? intent.price >= this.mark : intent.price <= this.mark;
+          if (crosses) return Promise.resolve(null);
+        }
+        const id = `L${++this.seq}`;
+        this.restingLimits.push({ id, side: intent.side, price: intent.price, qty: intent.qty });
+        return Promise.resolve(id);
+      }
       case 'CANCEL':
         this.restingLimits = this.restingLimits.filter((l) => l.id !== intent.orderId);
-        break;
+        return Promise.resolve(null);
     }
-    return Promise.resolve();
   }
 
   // ---- engine-facing ----
@@ -147,17 +160,17 @@ export class SimBroker implements ExecutionContext {
       qty = Number(floorQty(this.spec, (m.quoteQty ?? 0) / (px * (1 + feeFrac))));
     }
     if (qty <= 0) return;
-    this.fill(m.side, px, qty, false); // market = taker
+    this.fill(m.id, m.side, px, qty, false); // market = taker
   }
 
   private tryCrossLimit(l: RestingLimit, bar: Bar): boolean {
     const crosses = l.side === 'BUY' ? bar.low <= l.price : bar.high >= l.price;
     if (!crosses) return false;
-    this.fill(l.side, l.price, l.qty, true); // resting limit = maker
+    this.fill(l.id, l.side, l.price, l.qty, true); // resting limit = maker
     return true;
   }
 
-  private fill(side: 'BUY' | 'SELL', price: number, qty: number, isMaker: boolean): void {
+  private fill(orderId: string, side: 'BUY' | 'SELL', price: number, qty: number, isMaker: boolean): void {
     // long-only spot: never sell more than the held position (covers market + limit paths)
     if (side === 'SELL' && this.market === 'SPOT') qty = Math.min(qty, Math.max(this.pos.qty, 0));
     if (qty <= 0) return;
@@ -177,6 +190,6 @@ export class SimBroker implements ExecutionContext {
       }
     }
     this.fills.push({ time: this.nowMs, side, price, qty, fee });
-    this.fillCb?.({ orderId: '', side, price, qty, fee, feeAsset: this.spec.quoteAsset, isMaker, time: this.nowMs });
+    this.fillCb?.({ orderId, side, price, qty, fee, feeAsset: this.spec.quoteAsset, isMaker, time: this.nowMs });
   }
 }

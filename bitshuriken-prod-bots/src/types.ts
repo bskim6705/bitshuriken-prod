@@ -11,6 +11,7 @@ export type Level = [number, number];
 export interface DepthSnapshot {
   bids: Level[]; // descending price
   asks: Level[]; // ascending price
+  lastUpdateId?: number; // 로컬 거래소 REST 스냅샷만 — diff 스트림 동기화 기준점
 }
 
 /** An aggregate trade (the leg we replay locally). */

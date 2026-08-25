@@ -21,11 +21,12 @@ export interface Position {
   avgEntry: number;
 }
 
-/** What a strategy asks the broker to do; the broker enforces precision + min-notional. */
+/** What a strategy asks the broker to do; the broker enforces precision + min-notional.
+ *  LIMIT postOnly=true → maker-only (POST_ONLY GTC): 즉시 크로스면 거절되고 submit이 null을 반환. */
 export type OrderIntent =
   | { kind: 'MARKET'; side: Side; qty: number } // qty in base units
   | { kind: 'MARKET_QUOTE'; side: Side; quoteQty: number } // spot BUY by quote
-  | { kind: 'LIMIT'; side: Side; price: number; qty: number; tif?: 'GTC' | 'IOC' }
+  | { kind: 'LIMIT'; side: Side; price: number; qty: number; tif?: 'GTC' | 'IOC'; postOnly?: boolean }
   | { kind: 'CANCEL'; orderId: string }
   | { kind: 'FLATTEN' }; // close to a flat position
 
@@ -33,7 +34,9 @@ export type OrderIntent =
 export interface ExecutionContext {
   readonly spec: SymbolSpec;
   readonly market: Market;
-  submit(intent: OrderIntent): Promise<void>;
+  /** 주문 접수 시 orderId 반환 — 전략이 자기 resting 주문을 CANCEL로 지목할 수 있다.
+   *  미접수(사이즈 0/민노셔널 미달/거절)·CANCEL·FLATTEN은 null. */
+  submit(intent: OrderIntent): Promise<string | null>;
   position(): Position;
   /** mark-to-market equity in quote (USDT). sim: ledger; live: balances + last mark. */
   equityUsdt(): number;

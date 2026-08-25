@@ -5,6 +5,8 @@ import { LocalExchangeClient, type ApiKeyPair } from './exchange';
 import { buildFeeds } from './feeds';
 import { MakerBot } from './bots/maker';
 import { TakerBot } from './bots/taker';
+import { UserStream } from './user-stream';
+import { MarketStream } from './market-stream';
 import { makeLogger } from './log';
 import type { Feed, Market, SymbolSpec } from './types';
 
@@ -194,6 +196,17 @@ async function main(): Promise<void> {
   }
   log.ok(`accounts ready — ${clients.size} maker/taker pairs (one per symbol)`);
 
+  // 로컬 오더북 스트림(마켓당 WS 1개, `@depth@100ms` diff) — 메이커 터치·테이커 뎁스의
+  // 1차 소스로 REST 폴을 밀어낸다 (공백 시 각 봇이 REST로 후퇴). 스냅샷은 공개 API라 무인증.
+  const mstreams = new Map<Market, MarketStream>();
+  for (const market of ['SPOT', 'FUTURES'] as Market[]) {
+    const syms = wanted.filter((s) => s.market === market).map((s) => s.symbol);
+    if (syms.length === 0) continue;
+    const ms = new MarketStream(new LocalExchangeClient(`mstream-${market}`), market, syms);
+    ms.start();
+    mstreams.set(market, ms);
+  }
+
   const makers = new Map<string, MakerBot>();
   const takers = new Map<string, TakerBot>();
   for (const [key, { maker, taker, spec }] of clients) {
@@ -208,6 +221,7 @@ async function main(): Promise<void> {
         config.tuning.qtyTolerance,
         config.tuning.resyncMs,
         config.tuning.passOpsCap,
+        mstreams.get(spec.market),
       ),
     );
     takers.set(
@@ -218,8 +232,24 @@ async function main(): Promise<void> {
         config.tuning.takerMaxQtyFrac,
         config.tuning.takerMaxTps,
         spec.market === 'FUTURES' ? config.tuning.futuresMaxNotional : Infinity,
+        mstreams.get(spec.market),
       ),
     );
+  }
+
+  // per-maker user data stream: executionReport 푸시가 체결/취소/PO-reject의 1차 소스
+  // (resync는 안전망 캐덴스로 후퇴). 계정이 (role,market,symbol)당 1개라 스트림도 그 단위.
+  const streams: UserStream[] = [];
+  for (const [key, { maker, spec }] of clients) {
+    const bot = makers.get(key)!;
+    const stream = new UserStream(
+      maker,
+      spec.market,
+      bot.onExecutionReport,
+      `${spec.market === 'FUTURES' ? 'F:' : ''}${spec.symbol}`,
+    );
+    stream.start();
+    streams.push(stream);
   }
 
   // one feed per (source, market): Binance for USDT/USDC, Upbit for KRW.
@@ -252,6 +282,8 @@ async function main(): Promise<void> {
     shuttingDown = true;
     log.info(`${sig} — shutting down…`);
     clearInterval(refillTimer);
+    for (const s of streams) s.stop();
+    for (const ms of mstreams.values()) ms.stop();
     for (const f of feeds) f.stop();
     for (const t of takers.values()) t.stop();
     await Promise.allSettled([...makers.values()].map((m) => m.clear()));
