@@ -1,3 +1,4 @@
+import WebSocket from 'ws';
 import type { SubaccountClient } from '../core/exchange';
 import { ApiError } from '../core/exchange';
 import { makeLogger, type Logger } from '../core/logger';
@@ -22,13 +23,6 @@ interface StreamReport {
   ts: number;
 }
 
-/** Node ≥22 전역 WebSocket(undici)의 최소 표면 — 별도 ws 의존성 없이 사용. */
-interface WsLike {
-  addEventListener(type: 'message', cb: (ev: { data: unknown }) => void): void;
-  addEventListener(type: 'close' | 'error', cb: () => void): void;
-  close(): void;
-}
-
 const STREAM_KEEPALIVE_MS = 30 * 60 * 1000; // listenKey TTL 60분의 절반
 const STREAM_RECONNECT_MS = 3_000;
 
@@ -47,7 +41,7 @@ export class LiveBroker implements ExecutionContext {
   private baseFree = 0; // free base balance, decremented as SELLs are placed within a bar
   private fillsSeeded = false;
   private seenFills = new Set<string>(); // delivered trade ids (dedup, same-ms safe)
-  private streamWs: WsLike | null = null;
+  private streamWs: WebSocket | null = null;
   private streamStopped = false;
 
   constructor(
@@ -90,19 +84,14 @@ export class LiveBroker implements ExecutionContext {
 
   /**
    * user data stream 연결 — executionReport의 체결을 즉시 onFill로 전달한다 (per-bar 폴링은
-   * 안전망으로 유지, trade id 디덥으로 이중 전달 없음). 전역 WebSocket(Node ≥22)이 없거나
-   * 연결이 실패해도 치명 아님: 종전 폴링만으로 동작한다.
+   * 안전망으로 유지, trade id 디덥으로 이중 전달 없음). 연결 실패는 치명 아님: 재접속 루프가
+   * 돌고, 그동안 종전 폴링만으로 동작한다.
    */
   async connectUserStream(): Promise<void> {
-    const WS = (globalThis as { WebSocket?: new (url: string) => WsLike }).WebSocket;
-    if (!WS) {
-      this.log.warn('global WebSocket unavailable — fills stay poll-only');
-      return;
-    }
-    void this.streamLoop(WS);
+    void this.streamLoop();
   }
 
-  private async streamLoop(WS: new (url: string) => WsLike): Promise<void> {
+  private async streamLoop(): Promise<void> {
     while (!this.streamStopped) {
       try {
         const key = await this.client.createListenKey(this.market);
@@ -112,7 +101,7 @@ export class LiveBroker implements ExecutionContext {
             .catch((e: unknown) => this.log.warn('listenKey keepalive failed', (e as Error).message));
         }, STREAM_KEEPALIVE_MS);
         try {
-          await this.runStream(WS, key);
+          await this.runStream(key);
         } finally {
           clearInterval(keepalive);
         }
@@ -125,23 +114,23 @@ export class LiveBroker implements ExecutionContext {
   }
 
   /** 소켓이 닫힐 때 resolve — 루프가 키 재발급 후 재접속. */
-  private runStream(WS: new (url: string) => WsLike, listenKey: string): Promise<void> {
+  private runStream(listenKey: string): Promise<void> {
     return new Promise((resolve) => {
       const path = this.market === 'SPOT' ? '/ws/user' : '/ws/fuser';
-      const ws = new WS(`${apiBase(this.market).replace(/^http/, 'ws')}${path}?listenKey=${listenKey}`);
+      const ws = new WebSocket(`${apiBase(this.market).replace(/^http/, 'ws')}${path}?listenKey=${listenKey}`);
       this.streamWs = ws;
-      ws.addEventListener('message', (ev) => {
+      ws.on('message', (raw) => {
         try {
-          const msg = JSON.parse(String(ev.data)) as { stream?: string; data?: StreamReport };
+          const msg = JSON.parse(String(raw)) as { stream?: string; data?: StreamReport };
           if (msg.stream === 'executionReport' && msg.data) this.onStreamReport(msg.data);
         } catch {
           /* 형식 밖 메시지 무시 */
         }
       });
-      ws.addEventListener('error', () => {
+      ws.on('error', () => {
         /* close가 뒤따른다 */
       });
-      ws.addEventListener('close', () => resolve());
+      ws.on('close', () => resolve());
     });
   }
 
