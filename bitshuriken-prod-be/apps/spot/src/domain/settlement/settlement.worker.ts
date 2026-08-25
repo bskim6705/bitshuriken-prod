@@ -1,7 +1,6 @@
 import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import {
-  BalanceJournal,
   BalanceJournalKind,
   MarketType,
   Prisma,
@@ -18,7 +17,7 @@ import { JournalInput } from '@app/core-domain/ledger/ledger.types';
 import { LedgerService } from '@app/core-domain/ledger/ledger.service';
 import { LedgerAvailability } from '@app/core-domain/ledger/ledger-availability';
 import { LEDGER_TRUTH } from '@app/core-domain/ledger/ledger-truth';
-import { toEntry } from '@app/core-domain/ledger/journal-tailer';
+import { inputToEntry } from '@app/core-domain/ledger/journal-tailer';
 import { BalanceSnapshot, UserStreamService } from '../user-stream/user-stream.service';
 import { OrderLeg, WalletLeg } from './settlement.types';
 
@@ -128,7 +127,7 @@ export class SettlementWorker implements OnApplicationShutdown {
     const eventById = new Map(pending.map((e) => [e.id, e] as const));
 
     const latest = new Map<string, Wallet>();
-    const journalRows: BalanceJournal[] = [];
+    const appliedInputs: JournalInput[] = [];
     await this.prisma.$transaction(async (tx) => {
       const lockedRows = await tx.$queryRaw<{ id: string }[]>`
         SELECT "id" FROM "SettlementEvent"
@@ -205,12 +204,13 @@ export class SettlementWorker implements OnApplicationShutdown {
         const ev = eventById.get(pe.id);
         if (ev) pushSettlementJournalInputs(inputs, ev, pe.walletLegs);
       }
-      journalRows.push(...(await this.journal.writeManyInTx(tx, inputs)));
+      // createMany 1왕복 (행별 create 루프는 500이벤트×4레그 = tx 안 2000 왕복이었다)
+      if (await this.journal.createManyInTx(tx, inputs)) appliedInputs.push(...inputs);
     });
 
-    this.applyJournalRowsLocally(journalRows);
+    this.applyJournalInputsLocally(appliedInputs);
     // S2: 스냅샷을 원장(진실)에서 — Wallet 행은 프로젝터가 뒤따라 반영.
-    return this.useTruth() ? this.ledgerSnapshots(journalRows) : latest;
+    return this.useTruth() ? this.ledgerSnapshots(appliedInputs) : latest;
   }
 
   /** 최신 wallet 스냅샷을 유저별로 묶어 user-stream 발행. */
@@ -298,7 +298,7 @@ export class SettlementWorker implements OnApplicationShutdown {
     const legs = parseWalletLegs(event);
     const orderLegs = parseOrderLegs(event);
     const updatedWallets: Wallet[] = [];
-    const journalRows: BalanceJournal[] = [];
+    const appliedInputs: JournalInput[] = [];
     const useTruth = this.useTruth();
 
     await this.prisma.$transaction(async (tx) => {
@@ -354,17 +354,17 @@ export class SettlementWorker implements OnApplicationShutdown {
       // S0 원장 섀도: 적용된 이벤트의 leg를 저널 (fast-path와 동일 sourceKey 규칙 — 이중 기록 시 @unique가 차단).
       const inputs: JournalInput[] = [];
       pushSettlementJournalInputs(inputs, event, legs);
-      journalRows.push(...(await this.journal.writeManyInTx(tx, inputs)));
+      if (await this.journal.createManyInTx(tx, inputs)) appliedInputs.push(...inputs);
     });
 
-    this.applyJournalRowsLocally(journalRows);
-    return useTruth ? [...this.ledgerSnapshots(journalRows).values()] : updatedWallets;
+    this.applyJournalInputsLocally(appliedInputs);
+    return useTruth ? [...this.ledgerSnapshots(appliedInputs).values()] : updatedWallets;
   }
 
-  /** 커밋된 저널 rows를 원장에 즉시 반영 (멱등 — tailer 재수신은 sourceKey no-op). 소유 마켓만. */
-  private applyJournalRowsLocally(rows: BalanceJournal[]): void {
-    for (const row of rows) {
-      if (this.ledger.owns(row.marketType)) this.ledger.applyJournal(toEntry(row));
+  /** 커밋된 저널 입력을 원장에 즉시 반영 (멱등 — tailer 재수신은 sourceKey no-op). 소유 마켓만. */
+  private applyJournalInputsLocally(inputs: JournalInput[]): void {
+    for (const input of inputs) {
+      if (this.ledger.owns(input.marketType)) this.ledger.applyJournal(inputToEntry(input));
     }
   }
 
@@ -372,7 +372,9 @@ export class SettlementWorker implements OnApplicationShutdown {
    * S2 스냅샷: 저널 rows의 distinct (userId,asset,market) 키를 원장(진실)에서 읽어 Wallet 형태로
    * 합성 (emit용). 프로젝터가 뒤따라 Wallet 행을 갱신하지만 emit은 진실을 즉시 반영.
    */
-  private ledgerSnapshots(rows: BalanceJournal[]): Map<string, Wallet> {
+  private ledgerSnapshots(
+    rows: Array<Pick<JournalInput, 'userId' | 'assetSymbol' | 'marketType'>>,
+  ): Map<string, Wallet> {
     const out = new Map<string, Wallet>();
     for (const row of rows) {
       const parts = { userId: row.userId, assetSymbol: row.assetSymbol, marketType: row.marketType };

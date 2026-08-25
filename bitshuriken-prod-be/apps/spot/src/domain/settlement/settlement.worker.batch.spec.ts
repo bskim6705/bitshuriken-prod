@@ -6,10 +6,10 @@ import { LedgerAvailability } from '@app/core-domain/ledger/ledger-availability'
 import { UserStreamService } from '../user-stream/user-stream.service';
 import { SettlementWorker, planBatch, debitKeysOf, walletKey } from './settlement.worker';
 
-// S0 원장 섀도(박제): writeManyInTx는 no-op(빈 rows), ledger는 no-op 스텁.
+// S0 원장 섀도(박제): createManyInTx는 강등 no-op(false), ledger는 no-op 스텁.
 function ledgerStubs() {
   return {
-    journal: { writeManyInTx: jest.fn().mockResolvedValue([]) } as unknown as JournalWriter,
+    journal: { createManyInTx: jest.fn().mockResolvedValue(false) } as unknown as JournalWriter,
     ledger: {
       owns: jest.fn().mockReturnValue(true),
       applyJournal: jest.fn(),
@@ -258,7 +258,7 @@ describe('SettlementWorker.applyBatch (fast path)', () => {
 describe('SettlementWorker.applyBatch — parse-once 등가성', () => {
   it('leg 델타를 1회 파싱해 wallet 라우팅·저널 델타에 동일 Decimal을 전파', async () => {
     const tx = new FakeTx(['e1'], new Set(['A USDT SPOT'])); // USDT 행 존재(차감 대상)
-    const journal = { writeManyInTx: jest.fn().mockResolvedValue([]) } as unknown as JournalWriter;
+    const journal = { createManyInTx: jest.fn().mockResolvedValue(false) } as unknown as JournalWriter;
     const ledger = {
       owns: jest.fn().mockReturnValue(true),
       applyJournal: jest.fn(),
@@ -280,7 +280,7 @@ describe('SettlementWorker.applyBatch — parse-once 등가성', () => {
     ]);
 
     // 저널 델타 = leg 문자열과 정확히 일치 (재파싱 없이 파싱된 Decimal 전파)
-    const inputs = (journal.writeManyInTx as jest.Mock).mock.calls[0][1] as Array<{
+    const inputs = (journal.createManyInTx as jest.Mock).mock.calls[0][1] as Array<{
       assetSymbol: string;
       deltaBalance: Decimal;
       deltaLocked: Decimal;

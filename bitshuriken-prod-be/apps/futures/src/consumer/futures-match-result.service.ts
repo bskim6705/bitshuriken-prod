@@ -217,10 +217,14 @@ export class FuturesMatchResultService {
       tradeId: null,
       realizedPnl: null,
     };
-    const trade = await this.prisma.trade.findFirst({
-      where: { OR: [{ makerOrderId: order.id }, { takerOrderId: order.id }] },
-      orderBy: { seq: 'desc' },
-    });
+    // OR(BitmapOr)는 seq 정렬을 인덱스로 못 받는다 — 사이드별 (orderId, seq) 인덱스 limit-1
+    // 조회 2개로 분할 (Trade 성장에 따른 OU당 정렬 비용 제거)
+    const [asMaker, asTaker] = await Promise.all([
+      this.prisma.trade.findFirst({ where: { makerOrderId: order.id }, orderBy: { seq: 'desc' } }),
+      this.prisma.trade.findFirst({ where: { takerOrderId: order.id }, orderBy: { seq: 'desc' } }),
+    ]);
+    const trade =
+      asMaker && asTaker ? (asMaker.seq > asTaker.seq ? asMaker : asTaker) : (asMaker ?? asTaker);
     if (!trade) return empty;
 
     const isMaker = trade.makerOrderId === order.id;

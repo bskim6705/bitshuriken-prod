@@ -339,8 +339,9 @@ model Trade {
   @@index([makerUserId, createdAt])
   @@index([takerUserId, createdAt])
   // 정산 컨슈머 lastFillOf 조회 경로 — 부재 시 O(백로그) 역스캔이 처리량 붕괴 유발 (observations #23)
-  @@index([makerOrderId])
-  @@index([takerOrderId])
+  // (orderId, seq) 복합 — lastFill류 "주문의 최신 체결" limit-1이 정렬 없이 인덱스 역순으로
+  @@index([makerOrderId, seq])
+  @@index([takerOrderId, seq])
 }
 
 enum OrderSide {

@@ -3,7 +3,7 @@ import { BalanceJournal } from '@prisma/client';
 import { PrismaService } from '@app/infra/prisma/prisma.service';
 import { LedgerAvailability } from './ledger-availability';
 import { LedgerService } from './ledger.service';
-import { LedgerEntry } from './ledger.types';
+import { JournalInput, LedgerEntry } from './ledger.types';
 import { toScaledBigint } from './scaled';
 
 const DEFAULT_BATCH = 2000;
@@ -194,5 +194,21 @@ export function toEntry(row: BalanceJournal): LedgerEntry {
     marketType: row.marketType,
     deltaBalance: toScaledBigint(row.deltaBalance),
     deltaLocked: toScaledBigint(row.deltaLocked),
+  };
+}
+
+/**
+ * INSERT 입력 → LedgerEntry — createMany 경로의 커밋 직후 로컬 반영용 (반환 row 없음).
+ * seq=0: applyJournal은 sourceKey seen-set만 쓰고 seq는 미사용. tailer 재수신은 no-op.
+ */
+export function inputToEntry(input: JournalInput): LedgerEntry {
+  return {
+    seq: 0,
+    sourceKey: input.sourceKey,
+    userId: input.userId,
+    assetSymbol: input.assetSymbol,
+    marketType: input.marketType,
+    deltaBalance: toScaledBigint(input.deltaBalance),
+    deltaLocked: toScaledBigint(input.deltaLocked),
   };
 }

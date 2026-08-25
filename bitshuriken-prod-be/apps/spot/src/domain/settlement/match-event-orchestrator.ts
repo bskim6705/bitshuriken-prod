@@ -35,36 +35,50 @@ export class MatchEventOrchestrator {
    * wallet/order qty 변동은 worker가 비동기 반영.
    */
   async handleTrade(market: MarketType, trade: TradeData): Promise<void> {
-    const ticker = await this.prisma.ticker.findUnique({
-      where: { symbol_marketType: { symbol: trade.symbol, marketType: market } },
-    });
-    if (!ticker) {
-      this.logger.error(`unknown ticker ${market}/${trade.symbol}`);
-      return;
+    // base/quote 자산은 인메모리 meta가 1차 (TR마다 DB 왕복 금지 — 직렬 컨슈머 처리량 직결).
+    // meta 미적재(희귀 — 부팅 직후 컨트롤 지연)만 DB 폴백.
+    let baseAssetSymbol: string;
+    let quoteAssetSymbol: string;
+    const meta = this.tickerStats.metaOf(market, trade.symbol);
+    if (meta) {
+      baseAssetSymbol = meta.baseAsset;
+      quoteAssetSymbol = meta.quoteAsset;
+    } else {
+      const ticker = await this.prisma.ticker.findUnique({
+        where: { symbol_marketType: { symbol: trade.symbol, marketType: market } },
+      });
+      if (!ticker) {
+        this.logger.error(`unknown ticker ${market}/${trade.symbol}`);
+        return;
+      }
+      baseAssetSymbol = ticker.baseAssetSymbol;
+      quoteAssetSymbol = ticker.quoteAssetSymbol;
     }
 
-    const inserted = await this.settlement.recordTrade({
-      tradeId: trade.tradeId,
-      market,
-      tickerSymbol: trade.symbol,
-      baseAssetSymbol: ticker.baseAssetSymbol,
-      quoteAssetSymbol: ticker.quoteAssetSymbol,
-      makerOrderId: trade.makerOrderId,
-      takerOrderId: trade.takerOrderId,
-      makerUserId: trade.makerUserId,
-      takerUserId: trade.takerUserId,
-      takerSide: trade.takerSide,
-      price: trade.price,
-      qty: trade.qty,
-      ts: trade.ts,
-    });
-
-    // OCO 레그 체결 — 반대 레그 취소가 trigger 평가(applyTrade)보다 먼저 끝나야 한다.
-    // 중복 TR에도 실행 (직전 처리가 insert 후 죽었을 수 있음 — guarded 전이로 멱등)
-    const legs = await this.prisma.order.findMany({
-      where: { id: { in: [trade.makerOrderId, trade.takerOrderId] }, orderListId: { not: null } },
-      select: { id: true },
-    });
+    // OCO 레그 조회는 recordTrade와 독립 read — 병렬로 왕복 1회 절약 (사용은 여전히 둘 다 완료 후)
+    const [inserted, legs] = await Promise.all([
+      this.settlement.recordTrade({
+        tradeId: trade.tradeId,
+        market,
+        tickerSymbol: trade.symbol,
+        baseAssetSymbol,
+        quoteAssetSymbol,
+        makerOrderId: trade.makerOrderId,
+        takerOrderId: trade.takerOrderId,
+        makerUserId: trade.makerUserId,
+        takerUserId: trade.takerUserId,
+        takerSide: trade.takerSide,
+        price: trade.price,
+        qty: trade.qty,
+        ts: trade.ts,
+      }),
+      // OCO 레그 체결 — 반대 레그 취소가 trigger 평가(applyTrade)보다 먼저 끝나야 한다.
+      // 중복 TR에도 실행 (직전 처리가 insert 후 죽었을 수 있음 — guarded 전이로 멱등)
+      this.prisma.order.findMany({
+        where: { id: { in: [trade.makerOrderId, trade.takerOrderId] }, orderListId: { not: null } },
+        select: { id: true },
+      }),
+    ]);
     for (const leg of legs) {
       await this.orderLists.onLegExecuted(leg.id);
     }
@@ -169,14 +183,20 @@ export class MatchEventOrchestrator {
     orderId: string,
     userId: string,
   ): Promise<FillDetail | undefined> {
-    const trade = await this.prisma.trade.findFirst({
-      where: {
-        tickerSymbol: symbol,
-        tickerMarket: market,
-        OR: [{ makerOrderId: orderId }, { takerOrderId: orderId }],
-      },
-      orderBy: { seq: 'desc' },
-    });
+    // 사이드별 (orderId, seq) 인덱스 limit-1 조회 2개 — OR(BitmapOr)+정렬 제거. 주문은 단일
+    // 심볼에만 속하므로 orderId 조건이 심볼 필터를 함의한다.
+    const [asMaker, asTaker] = await Promise.all([
+      this.prisma.trade.findFirst({
+        where: { tickerSymbol: symbol, tickerMarket: market, makerOrderId: orderId },
+        orderBy: { seq: 'desc' },
+      }),
+      this.prisma.trade.findFirst({
+        where: { tickerSymbol: symbol, tickerMarket: market, takerOrderId: orderId },
+        orderBy: { seq: 'desc' },
+      }),
+    ]);
+    const trade =
+      asMaker && asTaker ? (asMaker.seq > asTaker.seq ? asMaker : asTaker) : (asMaker ?? asTaker);
     if (!trade) return undefined;
 
     const isMaker = trade.makerUserId === userId;

@@ -47,7 +47,7 @@ export class JournalWriter {
     private readonly availability: LedgerAvailability,
   ) {}
 
-  private data(input: JournalInput): Prisma.BalanceJournalCreateInput {
+  private data(input: JournalInput): Prisma.BalanceJournalCreateManyInput {
     return {
       userId: input.userId,
       assetSymbol: input.assetSymbol,
@@ -90,6 +90,19 @@ export class JournalWriter {
       rows.push(await tx.balanceJournal.create({ data: this.data(input) }));
     }
     return rows;
+  }
+
+  /**
+   * 다-leg 배치를 createMany 1왕복으로 (핫패스 — 행별 create 루프는 배치 500이벤트×4레그에서
+   * 트랜잭션 안 2000 왕복이었다). 반환 false = 강등(호출측이 로컬 원장 반영을 생략).
+   * 원장 로컬 반영은 seq가 필요 없으므로(applied set은 sourceKey) 반환 rows 없이 입력으로 충분.
+   */
+  async createManyInTx(tx: Prisma.TransactionClient, inputs: JournalInput[]): Promise<boolean> {
+    if (!this.availability.enabled) return false;
+    if (inputs.length > 0) {
+      await tx.balanceJournal.createMany({ data: inputs.map((i) => this.data(i)) });
+    }
+    return true;
   }
 
   /** 단독 INSERT (워커/콜드). 중복 sourceKey면 멱등 skip(null). 강등 시 null. */

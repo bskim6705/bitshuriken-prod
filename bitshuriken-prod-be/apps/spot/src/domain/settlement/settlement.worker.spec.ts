@@ -37,8 +37,8 @@ function makeEvent(legs: Array<{ lockedDelta: string; balanceDelta: string }>) {
 }
 
 function makeWorker(prisma: PrismaService) {
-  // S0 원장 섀도(박제): writeManyInTx는 no-op(빈 rows), ledger는 no-op 스텁.
-  const journal = { writeManyInTx: jest.fn().mockResolvedValue([]) };
+  // S0 원장 섀도(박제): createManyInTx는 강등 no-op(false), ledger는 no-op 스텁.
+  const journal = { createManyInTx: jest.fn().mockResolvedValue(false) };
   const ledger = { owns: jest.fn().mockReturnValue(true), applyJournal: jest.fn() };
   return new SettlementWorker(
     prisma,
