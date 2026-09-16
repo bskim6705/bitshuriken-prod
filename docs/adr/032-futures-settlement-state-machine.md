@@ -2,6 +2,7 @@
 
 ## Status
 Accepted
+> **[2026-09-16 배너]** 워커 순서는 `createdAt`이 아니라 **`seq asc`**(ms 동률·uuid tie-break 불가). 워커는 `apps/settle`에 거주([ADR-077](077-settlement-process-split-and-graceful-shutdown.md)). S2([ADR-069](069-in-memory-balance-ledger.md)) 이후 wallet leg 적용은 Wallet UPDATE가 아니라 `BalanceJournal` append. DLQ/QUARANTINED([ADR-067](067-settlement-dead-letter-queue.md))·`enforceReduceOnly` 사후 정리·기금 반대부호 netting RPNL은 본문에 없다.
 
 ## Context
 

@@ -2,6 +2,7 @@
 
 ## Status
 Accepted
+> **[2026-09-16 배너]** 'placement = 동기 Wallet update'와 'placement·REST가 같은 balance를 본다'는 [ADR-069](069-in-memory-balance-ledger.md) S2 이후 불성립 — 접수는 인메모리 원장 `reserve` + 저널 append, Wallet 행은 프로젝션(REST는 투영을 읽음). kind 6종·status 3종(QUARANTINED, ADR-067), fast path는 `SKIP LOCKED` 배치 클레임 + 델타 합산, 워커 거주는 settle 프로세스([ADR-077](077-settlement-process-split-and-graceful-shutdown.md)).
 
 ## Context
 

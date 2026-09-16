@@ -36,6 +36,8 @@ apps/portal/src/
 | **portal** | **5103** |
 | DB (docker postgres) | 5104 (5103에서 이동 — 앱 연속 번호 확보) |
 
+> **[2026-09-16 현행화]** 포트는 이후 재배정됐다: **settle 5104**([ADR-077](077-settlement-process-split-and-graceful-shutdown.md)), Postgres **5110**, Kafka **5113**(인프라 5110+ 대역, 로컬 5432 충돌 회피). 정본은 `bitshuriken-prod-be/.env.example`과 `scripts/exchange.sh`.
+
 ### 3. FE
 
 `portalApi` base(`NEXT_PUBLIC_PORTAL_API_URL`) 추가. auth/api-keys/transfers 호출만 전환. 나머지는 불변.

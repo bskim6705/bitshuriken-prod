@@ -2,6 +2,7 @@
 
 ## Status
 Accepted
+> **[2026-09-16 배너]** §2 스냅샷 내용은 `{seq, offset, bids, asks}`(epoch/trade_seq 없음). §3 tid 산식은 **[ADR-038](038-deterministic-trade-id.md) `maker-taker`로 대체(obsolete)**. seek는 파티션 공유 때문에 `max(min(last_offset+1), low)`(ADR-063), '스냅샷 없으면 빈 책+OFFSET_END'는 그 파티션에 스냅샷 lane이 하나도 없을 때만. escalation ②청크·④fork COW 미구현, lag 메트릭 없음(20ms 초과 print만). 본문에 없는 후속: SIGTERM 최종 스냅샷([ADR-077](077-settlement-process-split-and-graceful-shutdown.md) F0), 종결 기억 straddle 갭(관찰 #24).
 
 ## Context
 

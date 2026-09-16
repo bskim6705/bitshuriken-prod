@@ -2,6 +2,7 @@
 
 ## Status
 Accepted
+> **[2026-09-16 배너]** 본문은 isolated 전제이나 코드는 ADR-039의 cross 계정 일괄 청산도 포함(`liq.executor`). ADR에 없는 방어: 30s grace 경과·무체결 NEW 정리(REJECTED + 환불), 인플라이트 청산 주문 재사용, 드레인 워터마크. 청산 시 일반 체결 수수료와 청산 수수료를 **둘 다** 차감. flip 인수 margin은 기금 Position에 적립하면서 income만 기록·저널 없음(income 합 ≠ 기금 지갑 변화, 미해결). 워커 거주는 settle 프로세스([ADR-077](077-settlement-process-split-and-graceful-shutdown.md)).
 
 ## Context
 

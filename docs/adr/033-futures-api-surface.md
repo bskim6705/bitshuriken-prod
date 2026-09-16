@@ -2,6 +2,7 @@
 
 ## Status
 Accepted
+> **[2026-09-16 배너]** 'STOP/TP는 MVP 제외'는 코드와 다르다 — STOP_LOSS(_LIMIT)/TAKE_PROFIT(_LIMIT) 전부 허용 + mark 기준 BE 트리거(전용 ADR 없음). PATCH는 3-way XOR(ADR-028 배너). 추가 엔드포인트: `DELETE /futures/trading/open-orders`, leverage-brackets, commission-rate, account summary, `newClientOrderId`(ADR-061)·`stopPrice`. 검증 게이트 추가: 상장상태·계정 거래정지·심볼별 오픈주문 캡(ADR-068)·cross 청산 차단(ADR-039). MARKET의 min/maxNotional은 mark 기준, cost는 가정가 기준. `/ws/fuser`의 포지션·잔고 업데이트는 M1 이후 미도달(ADR-041 배너).
 
 ## Context
 

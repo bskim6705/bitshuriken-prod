@@ -2,6 +2,7 @@
 
 ## Status
 Accepted (partition 핀 부분은 ADR-063으로 대체 — "1 partition = 1 ticker" → symbol-hash 버킷 + key 라우팅. Lane 패턴·1인스턴스 N ticker·JSON config는 유지)
+> **[2026-09-16 배너]** 샘플 `lanes[(topic, partition)]`은 실제 `registry.get(msg.key())`, Lane은 8필드, `consumer.assign`은 항상 명시 offset(ADR-034/063). `engine/orderbook.py` 독스트링의 '1 partition = 1 ticker'는 stale.
 
 ## Context
 매칭엔진 인스턴스를 ticker 단위로 어떻게 운영할지 결정이 필요하다. 검토한 두 모델:

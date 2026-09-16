@@ -53,4 +53,5 @@ feedback-019(검증 안 된 코어 위에 큰 기능을 미리 쌓지 않기)의
   아카이브의 bots를 외부 클라이언트로 붙이거나 다른 메이커를 만드는 후속 작업.
 - 알려진 미해결 이슈는 포크로 승계된다: 주문 취소 레이스, trigger dead path
   (docs/specs/refactor-observations.md), futures 청산 보험기금 원장 누락,
-  ADR-064 런타임 e2e 미검증, ADR-060 rate-limit 미구현.
+  ADR-064 런타임 e2e 미검증, ADR-060 rate-limit은 Phase 1 구현·enforcement 기본 off(강제 미적용).
+- **재도입 이력(2026-09-16 기록)**: bots·agents는 [ADR-066](066-mirror-bots-krw-quote-tiered-ticks.md)으로 외부 클라이언트(HMAC 유저)로 복귀, mcp는 [ADR-074](074-prod-docs-mcp-server.md)로 개발자 도구로 복귀, 실험은 [ADR-075](075-fly-connectome-trading-brain.md)·feedback-029로 별도 프로젝트. 코어 런타임(be/fe/match/infra)에서 options/dex를 제외한 결정은 불변.

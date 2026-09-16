@@ -2,6 +2,7 @@
 
 ## Status
 Accepted
+> **[2026-09-16 배너]** §1 'isolated 전용·cross 없음'은 [ADR-039](039-cross-margin-per-position-toggle.md)가 per-position 토글로 확장했다(코드 `MarginMode {ISOLATED, CROSS}`, cross 판정·집행 구현). §3 PATCH는 `{leverage} | {marginDelta} | {marginMode}` 3-way XOR. fee 예약도 가정가 기준(코드가 더 보수적). cross 담보는 `freeBalance`까지 공유. §1만 읽으면 코드와 반대 결론이 난다.
 
 ## Context
 

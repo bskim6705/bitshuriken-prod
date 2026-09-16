@@ -2,6 +2,7 @@
 
 ## Status
 Accepted (2026-07-12, 유저 결정)
+> **[2026-09-16 배너]** spot 워커는 2단(fast-path 배치 → poison이면 per-event 폴백 → 격리; poison 1건이 배치 500건을 per-event로 떨어뜨리는 처리량 절벽). 양 워커가 settle 단일 프로세스([ADR-077](077-settlement-process-split-and-graceful-shutdown.md)). S2에서 'Wallet 행 부재' poison 원인은 소멸. DLQ 재적용 도구는 여전히 없고(감사 A15) failCounts는 인메모리.
 
 ## Context
 정산은 async 이벤트 로그(ADR-014)를 spot/futures 워커가 100ms tick으로 드레인한다. 적용 불가

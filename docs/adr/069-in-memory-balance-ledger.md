@@ -2,6 +2,7 @@
 
 - **Status**: Accepted (2026-07-15, §6 유저 확정 — 하단 "§6 확정" 참조). 2026-07-14 저녁 세션에서 방향 합의됨 ("원장을 먼저 잡되 빅뱅이 아니라 섀도 모드로"), 2026-07-15 구현 착수. **2026-07-16 S2 적용 완료** (S0 섀도 → 압축 게이트(kill -9 리플레이×2·quiesce 대조 0·check-integrity PASS) → truth 스위치 `LEDGER_TRUTH=true`). Wallet 행 락 소멸 실증 — 다음 병목은 Node 단일 프로세스(이벤트루프), 캠페인 기록: docs/test-reports/2026-07-16-adr069-ledger-s2-campaign.md.
 - **Context 근거 데이터**: docs/specs/refactor-observations.md **#23** (2026-07-14 실측 붕괴 + 부하테스트), 관찰 #21 (경계 멱등성 갭).
+- **2026-09-16 배너**: Decision의 '스냅샷은 엔진 snapshot_store와 동형'은 미구현 — 부팅은 §6-3대로 **저널 전량 리플레이**(실측 95.9만 엔트리, 수 초~수십 초). §6-5 '프로젝션 5s 초과 경보' 미구현. Decision §2의 순서는 실제로 `reserve`(메모리) → 저널 커밋(결과는 안전). portal 콜드 플로우 bounded 대기(S2b) 미구현. `release()`/`forgetApplied()` 호출자 0(applied Set 무한 성장). 프로젝터·드리프트는 M1 이후 settle 프로세스의 양 마켓 레플리카가 단독 구동([ADR-077](077-settlement-process-split-and-graceful-shutdown.md)) — `ledger-projector.ts` '소유 앱만 실행'·`futures-ledger.scheduler.ts` 'S0 섀도' 주석은 stale. 부트 baseline tx가 Prisma 5s를 넘는 문제는 관찰 #29.
 
 ## Context
 

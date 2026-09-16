@@ -2,6 +2,7 @@
 
 ## Status
 Accepted
+> **[2026-09-16 배너]** 모듈 구성·필드 축약 표·토픽 예시가 낡았다 — 실제는 `engine/{order,orderbook,matcher,lane,trade}`, `messaging/{topics,control,outbound,snapshot_store}`, `schemas/{order_codec,snapshot}`. MatchEngine은 **무상태**(`submit_new_order(book, taker)`, 라우팅은 `main.py`, publish는 `OutboundPublisher`; ADR-013). 필드는 `oq/oqq/eq/cqq`(ADR-009), `m`(market)은 없음(토픽이 결정). 토픽은 `match.{market}.{in|out|book|state|control}` + `op`(ADR-010).
 
 ## Context
 Python 매칭엔진을 처음부터 모듈화된 구조로 설계한다. 또한 매칭엔진과 주고받는 메시지(Kafka, WebSocket)는 거래소 특성상 매우 높은 빈도로 발생하므로, 필드명 축약으로 페이로드 크기를 최소화한다.

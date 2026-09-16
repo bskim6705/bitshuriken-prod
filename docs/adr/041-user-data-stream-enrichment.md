@@ -2,6 +2,7 @@
 
 ## Status
 Accepted (2026-06-14)
+> **[2026-09-16 배너]** M1([ADR-077](077-settlement-process-split-and-graceful-shutdown.md)) 이후 §3 positionUpdate·§4 per-fill executionReport·outboundAccountPosition은 **클라이언트에 도달하지 않는다** — 발행자(consume/settle 워커)는 settle 프로세스, 구독자(WS 게이트웨이)는 API 프로세스이고 사이가 in-process EventEmitter다. API 측 executionReport는 per-fill 필드가 null. 해법은 `be.user-events` 브로드캐스트 토픽(tps plan §5.2 M2 ④, [ADR-076](076-product-maturity-stages-and-blast-radius.md) §6-①).
 
 ## Context
 WS 감사에서 user-data-stream(spot `/ws/user`, futures `/ws/fuser`)의 공백이 드러났다:

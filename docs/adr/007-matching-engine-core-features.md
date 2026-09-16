@@ -2,6 +2,7 @@
 
 ## Status
 Accepted
+> **[2026-09-16 배너]** §2 'seq는 publish 안 함' → 지금은 `DepthDiffMsg.u`로 publish한다. §5 `E`(EXPIRED)는 ADR-026대로 엔진 `P` → BE가 EXPIRED 매핑. 본문에 없는 후속: 중복 id REJECTED + 종결 id FIFO 50k(관찰 #24), quote-driven MARKET BUY(잔여 quote가 1 step 미만이면 종료, dust는 BE 환불), FOK 사전 유동성 합산. §7 STP 없음은 유지.
 
 ## Context
 매칭 알고리즘을 처음 구현할 때, 나중에 추가하면 매칭 코어를 다시 써야 하는 기능들을 한 번에 흡수해야 한다. 또한 어떤 OrderType과 TimeInForce를 매칭엔진이 직접 처리할지 정해야 한다.

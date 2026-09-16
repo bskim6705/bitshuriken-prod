@@ -1,6 +1,7 @@
 # ADR-062: 프로덕션 배포 (단일 호스트 + GHCR + nginx)
 
 > **[bitshuriken-prod fork note, 2026-07-03]** 이 문서는 포크 시점에 현행화됨: dex 프로세스 제거(3 프로세스), 이미지명 `bitshuriken-prod-*`, 레포 `bitshuriken-prod-infra`. 파티션 정책은 ADR-063(FNV-1a 버킷)이 대체.
+> **[2026-09-16 현행화]** ① 모노레포(ADR-071) 전환 후 워크플로는 루트 `.github/workflows/release-{be,fe,match}.yml`(paths 필터) — 서비스 하위 `.github/`는 GitHub이 읽지 않는다. ② be는 settle 포함 **4 프로세스**([ADR-077](077-settlement-process-split-and-graceful-shutdown.md)) — compose에 `be-settle`, 엔진은 그 뒤 기동. ③ beta 제품의 메모리 상한·nginx 기동 의존 규칙은 [ADR-076](076-product-maturity-stages-and-blast-radius.md).
 
 ## Status
 Accepted (2026-06-18)
