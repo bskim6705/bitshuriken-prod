@@ -1,0 +1,86 @@
+name: ci
+
+# DB·Kafka 없이 도는 게이트만: BE jest + 빌드 타입체크, FE tsc + eslint, 엔진 pytest, bots/agents tsc.
+# 이미지 빌드는 release-{be,fe,match}.yml이 담당한다.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  be:
+    name: be (jest + tsc)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bitshuriken-prod-be
+    env:
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci # prisma generate용 placeholder — 접속하지 않음
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bitshuriken-prod-be/package-lock.json
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx tsc --noEmit -p tsconfig.build.json
+      - run: npm test -- --ci
+
+  fe:
+    name: fe (tsc + eslint)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bitshuriken-prod-fe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bitshuriken-prod-fe/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx eslint src
+
+  match:
+    name: match (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bitshuriken-prod-match
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: bitshuriken-prod-match/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+
+  bots-agents:
+    name: bots + agents (tsc)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        pkg: [bitshuriken-prod-bots, bitshuriken-prod-agents]
+    defaults:
+      run:
+        working-directory: ${{ matrix.pkg }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ matrix.pkg }}/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck

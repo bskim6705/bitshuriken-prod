@@ -1,10 +1,14 @@
-name: release
+name: release-fe
 
+# Monorepo: builds only when the frontend directory (or this workflow) changes.
 # NEXT_PUBLIC_* are baked into the image at build time, sourced from repository
 # variables (Settings -> Secrets and variables -> Actions -> Variables).
 on:
   push:
     branches: [main]
+    paths:
+      - "bitshuriken-prod-fe/**"
+      - ".github/workflows/release-fe.yml"
   workflow_dispatch:
 
 permissions:
@@ -35,12 +39,13 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./bitshuriken-prod-fe
+          file: ./bitshuriken-prod-fe/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=fe
+          cache-to: type=gha,mode=max,scope=fe
           build-args: |
             NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
             NEXT_PUBLIC_FUTURES_API_URL=${{ vars.NEXT_PUBLIC_FUTURES_API_URL }}

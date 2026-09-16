@@ -5,6 +5,7 @@ services:
       # 5110: 호스트 로컬 postgres(brew 등)와의 5432 충돌 회피. 인프라는 5110+ 대역 (FE 5100 / 백엔드 5101~5109 / 인프라 5110~)
       - "5110:5432"
     environment:
+      # dev 전용 자격 증명 — 로컬 컨테이너에서만 쓴다. prod는 .env.prod(예시는 infra/.env.prod.example)로 별도.
       POSTGRES_USER: bitshuriken
       POSTGRES_PASSWORD: bitshuriken
       POSTGRES_DB: bitshuriken

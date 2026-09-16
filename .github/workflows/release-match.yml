@@ -1,8 +1,12 @@
-name: release
+name: release-match
 
+# Monorepo: builds only when the matching-engine directory (or this workflow) changes.
 on:
   push:
     branches: [main]
+    paths:
+      - "bitshuriken-prod-match/**"
+      - ".github/workflows/release-match.yml"
   workflow_dispatch:
 
 permissions:
@@ -26,16 +30,17 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/bitshuriken-prod-be
+          images: ghcr.io/${{ github.repository_owner }}/bitshuriken-prod-match
           tags: |
             type=raw,value=latest
             type=sha,format=short
 
       - uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./bitshuriken-prod-match
+          file: ./bitshuriken-prod-match/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=match
+          cache-to: type=gha,mode=max,scope=match

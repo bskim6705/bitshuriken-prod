@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
-# Nest monorepo -> one image, three processes (compose sets the command per app):
-#   node dist/apps/{spot,futures,portal}/main
+# Nest monorepo -> one image, four processes (compose sets the command per app):
+#   node dist/apps/{spot,futures,portal,settle}/main
 # be-migrate runs `npx prisma migrate deploy` from this same image.
 
 # ---- builder: full deps + prisma client + webpack build ----
