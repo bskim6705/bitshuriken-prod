@@ -8,23 +8,29 @@
 
 ```
 bitshuriken-prod-match/
-├── main.py             # 엔트리포인트: config → Lane 생성, symbol(key) 라우팅 루프
+├── main.py             # 부팅(스냅샷 복원 → WAL replay → control 흡수) + symbol(key) 라우팅 루프 + SIGTERM 최종 스냅샷
 ├── config/
 │   ├── tickers-spot.json     # spot 인스턴스용 ticker 목록
-│   └── tickers-futures.json  # futures 인스턴스용 ticker 목록
+│   ├── tickers-futures.json  # futures 인스턴스용 ticker 목록
+│   └── tickers.json          # 합본 — BE prisma seed의 티커 소스. 엔진 실행에는 쓰지 않는다(분리 운영만)
 ├── engine/
 │   ├── order.py        # Order dataclass + enum (Type/Side/Status/TimeInForce)
-│   ├── orderbook.py    # OrderBook (가격-시간 우선 호가창 + depth diff 추적)
+│   ├── orderbook.py    # OrderBook (가격-시간 우선 호가창 + depth diff 추적 + 종결 id FIFO)
 │   ├── matcher.py      # MatchEngine (매칭 알고리즘, 상태 없음)
+│   ├── lane.py         # Lane(1 ticker = 토픽 입출력 + OrderBook) + LaneRegistry, config 로드
 │   └── trade.py        # Trade dataclass
 ├── messaging/
 │   ├── consumer.py     # Kafka consumer 래퍼
 │   ├── producer.py     # Kafka producer 래퍼
+│   ├── outbound.py     # TR/OU/DPD 발행 (out·book 토픽)
+│   ├── snapshot_store.py  # state 토픽 스냅샷 발행(30s dirty)·복원·inbound seek
+│   ├── control.py      # control 토픽(런타임 상장 ADD) 읽기
 │   └── topics.py       # 토픽 이름 / op 코드 상수
 ├── schemas/
 │   ├── messages.py     # 축약 필드 메시지 dataclass (직렬화/역직렬화)
+│   ├── order_codec.py  # Order ↔ 스냅샷 dict
 │   └── snapshot.py     # Lane 스냅샷 직렬화/복원 (match.{market}.state)
-└── tests/              # pytest (Kafka 불필요, 엔진 직접 호출)
+└── tests/              # pytest (Kafka 불필요, 엔진 직접 호출) — 설계는 tests/SCENARIOS.md
 ```
 
 ### Responsibilities
@@ -32,7 +38,7 @@ bitshuriken-prod-match/
 - **Order** — 단일 주문. price/qty는 모두 int (`* 10^8`). `orig_qty`(base) 또는 `orig_quote_qty`(quote) 중 하나로 구동.
 - **OrderBook** — 한 ticker의 bid/ask 호가창. add / cancel / partial_fill + depth diff용 dirty level·seq 추적.
 - **MatchEngine** — OrderBook을 인자로 받아 매칭만 수행 (POST_ONLY/FOK 사전 체크, 매칭 루프, 잔여 종결).
-- **Lane** (main.py) — 1 ticker에 대응하는 토픽 입출력 + OrderBook 묶음. 1 인스턴스 N ticker.
+- **Lane** (engine/lane.py) — 1 ticker에 대응하는 토픽 입출력 + OrderBook 묶음. 1 인스턴스 N ticker, 여러 lane이 한 partition 버킷을 공유.
 
 ## Config
 
@@ -52,7 +58,8 @@ bitshuriken-prod-match/
 
 - `market` → 토픽 결정: `match.{market}.{in|out|book}`
 - `partition` → P개 고정 버킷 중 하나 (FNV-1a(symbol)%P, 여러 ticker가 한 파티션 공유)
-- `pricePrecision`/`qtyPrecision` → `price_tick = 10^(8-pricePrecision)`, `qty_step = 10^(8-qtyPrecision)`
+- `qtyPrecision` → `qty_step = 10^(8-qtyPrecision)` (quote-driven MARKET BUY의 수량 floor에만 사용)
+- `pricePrecision` → 엔진은 tick을 검증하지 않는다(입력 검증은 BE). config에는 BE seed·exchange-info용으로 남는다
 
 ## Precision
 
@@ -115,7 +122,7 @@ MARKET BUY 구동 방식: **spot은 quote-driven** (`oqq` > 0, `oq`="0"), **futu
 
 ## State recovery
 
-inbound 토픽(`match.{market}.in`)이 WAL이고 매칭은 결정적이다(trade id = `{symbol}-{epoch}-{trade_seq}`). 엔진은 lane이 dirty이고 마지막 스냅샷 후 30s가 지나면 poll 타임아웃 heartbeat에서 book 상태+마지막 처리 inbound offset을 `match.{market}.state`(log-compacted, key=symbol, lane과 같은 partition)에 1메시지로 발행한다. 부팅 시 state 토픽에서 lane별 마지막 스냅샷을 복원하고 inbound를 `offset+1`부터 일반 처리한다 — replay 구간의 outbound는 그대로 재방출되며 BE가 sourceKey로 멱등 처리한다. 스냅샷이 없으면 빈 책 + 새 epoch으로 inbound 최신(latest)부터 시작한다(과거 일부만 replay하면 빈 책에 가짜 매칭이 생기므로).
+inbound 토픽(`match.{market}.in`)이 WAL이고 매칭은 결정적이다(trade id = `{makerOrderId}-{takerOrderId}`, 재부팅·replay에도 동일 — ADR-038). 엔진은 lane이 dirty이고 마지막 스냅샷 후 30s가 지나면 poll 타임아웃 heartbeat에서 book 상태+마지막 처리 inbound offset을 `match.{market}.state`(log-compacted, key=symbol, lane과 같은 partition)에 1메시지로 발행한다. 부팅 시 state 토픽에서 lane별 마지막 스냅샷을 복원하고 inbound를 `offset+1`부터 일반 처리한다 — replay 구간의 outbound는 그대로 재방출되며 BE가 sourceKey로 멱등 처리한다. 그 파티션에 스냅샷 lane이 하나도 없으면 빈 책 + seq 0으로 inbound 최신(latest)부터 시작한다(과거 일부만 replay하면 빈 책에 가짜 매칭이 생기므로). SIGTERM은 최종 스냅샷 + flush 후 종료한다.
 
 ## Setup
 

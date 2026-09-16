@@ -43,8 +43,10 @@ separate service that owns its own deployment (feedback-023).
   activate a ticker (admin `X-Admin-Secret`) and — if the separate **bots** service is
   present at `BOTS_DIR` — spawn a Binance mirror per symbol.
 
-Ships three strategies: `momentum` (EMA-cross + RSI), `grid` (long-only spot grid, onFill
-ladder), and `buy-and-hold` (the comparison baseline). The LLM authors more.
+Ships 21 strategies in `src/strategies/` (momentum, grid variants, dip/ATR ladders,
+breakout/fade families, and `buy-and-hold` as the comparison baseline). The registry
+(`strategy/registry.ts`) loads them dynamically, so a new strategy is one file. Most of
+them came out of the EVO-7 genetic campaigns recorded in `docs/test-reports/`.
 
 ## Prerequisites
 
@@ -169,12 +171,15 @@ src/
   data/marketdata.ts   klines (local|binance) + indicators
   indicators/          ma, rsi, atr, series, scan (signalScan)
   strategy/            types (Strategy/ExecutionContext contracts), sizing, registry (dynamic import)
-  strategies/          momentum.ts, grid.ts, buy-and-hold.ts
+  strategies/          21 strategy modules (one file each, dynamic import by the registry)
   broker/              live.ts (HMAC REST + fill polling), sim.ts (deterministic backtest fills)
   metrics/             compute (pure), live (from BE), integrity (ledger↔balance recon + health), compare, store (JSON), types
   fleet/               supervisor, agent (runner), barsource (BarClock), bot-manager (mirror spawn), state
   control/             server (node:http API + static dashboard), client
   backtest/engine.ts   runBacktest (shared by CLI + daemon)
+  arb/ maker/ obook/   standalone runners: triangular/kimchi arb, market maker, order-book taker
+  probe/               exchange probes (churn, fee, precision, self-cross) against the live stack
+  cleanup.ts           residual order/position sweep for agent subaccounts
   daemon.ts cli.ts mcp.ts backtest-cli.ts
 web/                   management dashboard (vanilla HTML/CSS/JS, served by agentd)
 ```

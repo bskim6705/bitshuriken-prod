@@ -1,98 +1,43 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# bitshuriken-prod-be
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Bitshuriken 거래소 백엔드 — Nest.js 모노레포(apps + libs), Prisma(단일 Postgres), Kafka. 매칭은 별도 Python 엔진이 하고 BE는 접수·잠금·정산·계정·API를 담당한다. 시스템 계약은 상위 [CLAUDE.md](../CLAUDE.md), 코드 컨벤션은 [CLAUDE.md](CLAUDE.md).
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## 프로세스
 
-## Description
+| 앱 | 포트 | 역할 |
+| --- | --- | --- |
+| `apps/spot` | 5101 | 현물 주문·계정·마켓 데이터·WS(`/ws/market`, `/ws/user`) |
+| `apps/futures` | 5102 | 무기한 선물 — 마진·포지션·mark price·펀딩·청산·보험기금·WS |
+| `apps/portal` | 5103 | cross-product — 인증·API key·이체·리더보드·서브계정·관리자 |
+| `apps/settle` | 5104 | 정산 프로세스([ADR-077](../docs/adr/077-settlement-process-split-and-graceful-shutdown.md)) — 엔진 out 토픽의 DB 효과, 양 마켓 정산 워커, DLQ, 원장 레플리카·프로젝터. HTTP는 `/health`뿐 |
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+`libs/shared`(decimal·예외·상수·WS 베이스), `libs/infra`(Kafka·Prisma), `libs/core-domain`(auth·user·wallet·ledger·ticker·orderbook·kline)을 네 앱이 공유한다. 이미지는 하나이고 `command`만 다르다.
 
-## Project setup
+## 핵심 설계
+
+- 주문 mutation은 반드시 매칭엔진 경유. BE는 체결·취소 상태를 직접 만들지 않는다.
+- 잔고의 진실은 인메모리 원장 + append-only `BalanceJournal`이고 `Wallet` 행은 프로젝션이다([ADR-069](../docs/adr/069-in-memory-balance-ledger.md)). 접수 응답은 저널 커밋 후에만 나간다.
+- 정산은 append-only `SettlementEvent`를 워커가 `seq` 순으로 적용한다([ADR-014](../docs/adr/014-async-settlement-via-event-log.md), [ADR-032](../docs/adr/032-futures-settlement-state-machine.md)). poison 이벤트는 5회 후 DLQ로 격리([ADR-067](../docs/adr/067-settlement-dead-letter-queue.md)).
+- 금액은 `Decimal` 8자리, Kafka 경계는 scaled-int string. 라운딩은 `libs/shared/src/decimal.ts`만.
+
+## 실행
 
 ```bash
-$ npm install
+npm install
+cp .env.example .env          # PORT_SPOT/FUTURES/PORTAL/SETTLE, DATABASE_URL(5110), KAFKA_BROKER(5113)
+npx prisma migrate deploy      # 스키마 변경은 schema.prisma만 수정하고 migrate는 사람이 실행
+npm run build                  # nest build spot/futures/portal/settle
+npm run start:prod:spot        # :futures / :portal / :settle
 ```
 
-## Compile and run the project
+전체 스택은 루트 `./scripts/exchange.sh start`가 정본이다(빌드 후 dist 실행, `--watch` 금지).
+
+## 테스트
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+npm test                # jest 유닛 — 순수 생성자 mock, DB 불필요 (42 suites / 419 tests)
+npm run test:e2e        # test/*.e2e-spec.ts — 실 DB 필요
+npx tsc --noEmit -p tsconfig.build.json
 ```
 
-## Run tests
-
-```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
-```
-
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+정합성 검증(F1~F5: 장부 대사·청산 오라클·선물 원장·frozen·DLQ)은 `bitshuriken-prod-bots`의 `check-integrity`가 담당한다.
