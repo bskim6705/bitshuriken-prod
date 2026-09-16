@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "bitshuriken-prod-docs": {
+      "command": "node",
+      "args": ["bitshuriken-prod-mcp/dist/index.js"]
+    }
+  }
+}
