@@ -1,0 +1,30 @@
+name: bitshuriken-prod-fly
+
+# 거래소가 다른 호스트에 있을 때 (예: 거래소는 개발 머신, 초파리만 맥미니). .env의 SPOT_API/PORTAL_API를 LAN 주소로:
+#   SPOT_API=http://192.168.0.10:5101  PORTAL_API=http://192.168.0.10:5103
+#   docker compose -f docker-compose.remote.yml up -d --build
+x-fly: &fly
+  build: .
+  image: bitshuriken-prod-fly:latest
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    DATA_DIR: /app/data
+    FLY_HOST: 0.0.0.0
+  volumes:
+    - fly-data:/app/data
+
+services:
+  fly-record:
+    <<: *fly
+    command: ["record", "${FLY_SYMBOL:-BTCUSDT}"]
+  fly-league:
+    <<: *fly
+    depends_on:
+      - fly-record
+    command: ["league", "${FLY_SYMBOL:-BTCUSDT}", "flies=${FLY_FLIES:-4}", "season=${FLY_SEASON_MIN:-45}", "relegate=${FLY_RELEGATE:-1}", "minTrades=${FLY_MIN_TRADES:-2}", "capital=${FLY_CAPITAL_USDT:-10000}", "workers=${FLY_WORKERS:-1}", "fitHours=${FLY_FIT_HOURS:-1}"]
+    ports:
+      - "${FLY_BIND:-0.0.0.0}:5130:5130"
+
+volumes:
+  fly-data:

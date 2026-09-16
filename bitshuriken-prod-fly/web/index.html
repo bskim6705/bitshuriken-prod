@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>fly — 초파리 뇌</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%AA%B0%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">🪰 fly <span class="dim">FlyWire FAFB v783 · bitshuriken-prod</span></div>
+      <div class="health">
+        <span class="stat"><span class="k">status</span><span class="v" id="h-status">—</span></span>
+        <span class="stat"><span class="k">symbol</span><span class="v" id="h-symbol">—</span></span>
+        <span class="stat"><span class="k">neurons</span><span class="v" id="h-neurons">—</span></span>
+        <span class="stat"><span class="k">synapses</span><span class="v" id="h-synapses">—</span></span>
+        <span class="stat"><span class="k">last bar</span><span class="v" id="h-bar">—</span></span>
+      </div>
+      <div class="controls"><span class="updated" id="updated"></span></div>
+    </header>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <main class="grid">
+      <section class="card">
+        <div class="card-head"><h2>Account <span class="dim">서브계정</span></h2><span class="dim small" id="acct-sub"></span></div>
+        <div class="metrics" id="acct-metrics"></div>
+        <div class="exposure-wrap"><span class="dim small">target exposure</span><div class="exposure"><span id="exposure-bar"></span></div></div>
+        <div class="chart-wrap"><canvas id="equity"></canvas></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>Readout <span class="dim">하강뉴런 판독 ŷ</span></h2><span class="dim small" id="model-sub"></span></div>
+        <div class="metrics" id="readout-metrics"></div>
+        <div class="chart-wrap"><canvas id="readout"></canvas></div>
+        <p class="dim small">yellow = ŷ (predicted vol-normalized return over H bars) · green = long exposure · dashed = 0 and full-exposure level</p>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>Population activity <span class="dim">감각 → 중앙 → 하강</span></h2><span class="dim small">mean |h| per population</span></div>
+        <div class="pops" id="pops"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>Descending neurons <span class="dim">디코더가 읽는 1,305 세포</span></h2><span class="dim small">blue − / orange +</span></div>
+        <canvas id="dn"></canvas>
+        <div class="card-head" style="margin-top:14px"><h2>Sensory input <span class="dim" id="sensory-sub">피처 → 감각 집단</span></h2></div>
+        <div class="pops" id="sensory"></div>
+      </section>
+
+      <section class="card span2 hidden" id="book-card">
+        <div class="card-head"><h2>Order book <span class="dim">실시간 top-10 · 1초 샘플</span></h2><span class="dim small" id="book-sub"></span></div>
+        <div class="book" id="book"></div>
+      </section>
+
+      <section class="card span2">
+        <div class="card-head"><h2>Decisions <span class="dim">bar마다</span></h2><span class="dim small" id="dec-sub"></span></div>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>time</th><th class="num">price</th><th class="num">ŷ</th><th class="num">exposure</th><th>action</th><th class="num">equity</th><th class="num">position</th></tr></thead>
+            <tbody id="actions"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card span2">
+        <div class="card-head"><h2>Fills <span class="dim">/account/trades</span></h2></div>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>time</th><th>side</th><th class="num">price</th><th class="num">qty</th><th class="num">quote</th><th class="num">fee</th><th>maker</th></tr></thead>
+            <tbody id="fills"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

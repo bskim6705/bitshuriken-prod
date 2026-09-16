@@ -1,0 +1,48 @@
+name: bitshuriken-prod-fly
+
+# 초파리 리그 — 별개 서비스, 자기 배포 정의 (feedback-023). 코어 스택(bitshuriken-prod-infra)의 내부 네트워크에
+# external로 붙어 be-spot/be-portal 내부 DNS로 거래소를 일반 유저처럼 쓴다 (feedback-025).
+#   cd bitshuriken-prod-fly && cp .env.example .env   # MASTER_*·FLY_CAPITAL_USDT 등 조정
+#   docker compose up -d --build                        # recorder + league (+ 대시보드 :5130)
+# 관전: http://<host>:5130 (인증 없음 — FLY_BIND 기본 127.0.0.1; LAN 관전은 FLY_BIND=0.0.0.0).
+# FE의 /fly 페이지는 NEXT_PUBLIC_FLY_API_URL=http://<host>:5130 으로 같은 API를 읽는다.
+#
+# 리소스(M1 실측, 부하 상태): 파리 1마리 ≈ CPU 6~7%(1코어 기준)·RSS 55MB, 8마리 ≈ 0.5코어·450MB. 기록은 1초 샘플 ≈ 7MB/시간.
+# 느린 기계(2012 Mac mini 급 Ivy Bridge): 뇌 스텝 ≈ 50~100ms → FLY_FLIES=4, FLY_WORKERS=1, FLY_SEASON_MIN=45, FLY_FIT_HOURS=1 권장.
+# 거래소가 다른 호스트에 있으면 docker-compose.remote.yml 을 쓴다 (내부 네트워크 대신 SPOT_API/PORTAL_API 공개 주소).
+
+x-fly: &fly
+  build: .
+  image: bitshuriken-prod-fly:latest
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    SPOT_API: http://be-spot:5101
+    PORTAL_API: http://be-portal:5103
+    DATA_DIR: /app/data
+    FLY_HOST: 0.0.0.0
+  volumes:
+    - fly-data:/app/data
+  networks:
+    - bitshuriken_internal
+
+services:
+  fly-record:
+    <<: *fly
+    command: ["record", "${FLY_SYMBOL:-BTCUSDT}"]
+
+  fly-league:
+    <<: *fly
+    depends_on:
+      - fly-record
+    command: ["league", "${FLY_SYMBOL:-BTCUSDT}", "flies=${FLY_FLIES:-8}", "season=${FLY_SEASON_MIN:-30}", "relegate=${FLY_RELEGATE:-3}", "minTrades=${FLY_MIN_TRADES:-2}", "capital=${FLY_CAPITAL_USDT:-10000}", "workers=${FLY_WORKERS:-3}", "fitHours=${FLY_FIT_HOURS:-2}"]
+    ports:
+      - "${FLY_BIND:-127.0.0.1}:5130:5130"
+
+volumes:
+  fly-data:
+
+networks:
+  bitshuriken_internal:
+    external: true
+    name: bitshuriken_internal

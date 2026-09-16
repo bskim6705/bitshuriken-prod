@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>fly league — 초파리 리그</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%8F%86%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">🪰 fly league <span class="dim">초파리 트레이딩 컴피티션</span></div>
+      <div class="health">
+        <span class="stat"><span class="k">symbol</span><span class="v" id="h-symbol">—</span></span>
+        <span class="stat"><span class="k">season</span><span class="v" id="h-season">—</span></span>
+        <span class="stat"><span class="k">time left</span><span class="v" id="h-left">—</span></span>
+        <span class="stat"><span class="k">flies</span><span class="v" id="h-flies">—</span></span>
+        <span class="stat"><span class="k">rule</span><span class="v" id="h-rule">—</span></span>
+      </div>
+      <div class="controls"><span class="updated" id="updated"></span></div>
+    </header>
+    <div id="banner" class="banner hidden"></div>
+    <main class="grid">
+      <section class="card span2">
+        <div class="card-head"><h2>Standings <span class="dim">시즌 순수익 순위 · 하위는 강등 존</span></h2><span class="dim small" id="table-sub"></span></div>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>#</th><th>fly</th><th>parent</th><th>born</th><th>seasons</th><th>status</th><th class="num">equity</th><th class="num">season pnl</th><th class="num">lifetime</th><th class="num">orders</th><th class="num">win</th><th class="num">ŷ</th><th>pos</th><th>last action</th></tr></thead>
+            <tbody id="standings"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>Hall of fame <span class="dim">명예의 전당</span></h2></div>
+        <div class="metrics" id="hof"></div>
+        <div class="card-head" style="margin-top:12px"><h2>Season history</h2></div>
+        <div class="scroll"><table><thead><tr><th>season</th><th>champion</th><th class="num">pnl</th><th>relegated</th><th>newborn</th></tr></thead><tbody id="history"></tbody></table></div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2 id="detail-title">Fly detail <span class="dim">클릭해서 선택</span></h2><span class="dim small" id="detail-sub"></span></div>
+        <div class="metrics" id="detail-metrics"></div>
+        <div class="chart-wrap"><canvas id="readout"></canvas></div>
+        <div class="brain-label" style="margin-top:10px">population activity</div>
+        <div class="pops" id="pops"></div>
+        <div class="brain-label" style="margin-top:10px">descending neurons</div>
+        <canvas id="dn"></canvas>
+      </section>
+    </main>
+    <script src="/league.js"></script>
+  </body>
+</html>
