@@ -8,13 +8,20 @@ import { LanguageSwitcher } from "@/components/ui/language-switcher";
 import { useCurrentUser, useLogout } from "@/lib/hooks/use-auth";
 import { useNotificationFeed } from "@/lib/notifications/feed";
 import { useT } from "@/lib/i18n/provider";
+import type { TranslationKey } from "@/lib/i18n/messages";
+import { PRODUCT_STAGES, type Product } from "@/lib/product-stages";
 
-const PRIMARY = [
+type NavItem = { href: string; labelKey: TranslationKey; product?: Product };
+
+// 제품 단계(ADR-076): alpha는 내비에서 제외, beta는 BETA 배지.
+const PRIMARY: readonly NavItem[] = [
   { href: "/markets", labelKey: "chrome.nav.markets" },
-  { href: "/trade/BTCUSDT", labelKey: "chrome.nav.spot" },
-  { href: "/futures/BTCUSDT", labelKey: "chrome.nav.futures" },
+  { href: "/trade/BTCUSDT", labelKey: "chrome.nav.spot", product: "spot" },
+  { href: "/futures/BTCUSDT", labelKey: "chrome.nav.futures", product: "futures" },
   { href: "/leaderboard", labelKey: "chrome.nav.leaderboard" },
-] as const;
+  { href: "/fly", labelKey: "chrome.nav.fly" },
+];
+const VISIBLE = PRIMARY.filter((n) => !n.product || PRODUCT_STAGES[n.product] !== "alpha");
 
 const ICON_CLS =
   "w-9 h-9 grid place-items-center text-text-dim hover:text-text hover:bg-raised";
@@ -44,7 +51,7 @@ export function TopNav() {
           <Wordmark />
         </div>
         <nav className="flex items-center">
-          {PRIMARY.map((n) => {
+          {VISIBLE.map((n) => {
             const section = "/" + n.href.split("/")[1];
             const active = pathname === section || pathname.startsWith(section + "/");
             return (
@@ -59,6 +66,14 @@ export function TopNav() {
                 }`}
               >
                 {t(n.labelKey)}
+                {n.product && PRODUCT_STAGES[n.product] === "beta" ? (
+                  <span
+                    className="ml-1 text-[9px] leading-none text-accent border border-accent px-1 py-px"
+                    title={t("chrome.nav.betaTitle")}
+                  >
+                    {t("chrome.nav.beta")}
+                  </span>
+                ) : null}
               </Link>
             );
           })}

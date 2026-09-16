@@ -1,5 +1,6 @@
 "use client";
 
+import { APP_VERSION } from "@/lib/version";
 import Link from "next/link";
 import { TopNav } from "@/components/layout/top-nav";
 import { Footer } from "@/components/layout/footer";
@@ -78,7 +79,7 @@ export default function HomePage() {
                 <span className="text-accent border border-accent/40 bg-accent/10 px-2 py-0.5 font-medium tracking-wider">
                   {t("landing.hero.badge")}
                 </span>
-                <span className="text-text-dim tnum">v2.0.0-dev</span>
+                <span className="text-text-dim tnum">{APP_VERSION}</span>
               </div>
               <h1 className="text-[32px] md:text-[42px] font-semibold tracking-tight leading-[1.1]">
                 {t("landing.hero.titleLine1")}

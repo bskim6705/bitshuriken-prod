@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useT } from "@/lib/i18n/provider";
+import { APP_VERSION } from "@/lib/version";
 
 export function Footer() {
   const t = useT();
@@ -14,7 +15,7 @@ export function Footer() {
           <Link href="/api-docs" className="hover:text-text">{t("chrome.footer.api")}</Link>
           <Link href="/leaderboard" className="hover:text-text">{t("chrome.footer.leaderboard")}</Link>
           <Link href="/#terms" className="hover:text-text">{t("chrome.footer.terms")}</Link>
-          <span className="tnum">v2.0.0-dev</span>
+          <span className="tnum">{APP_VERSION}</span>
         </div>
       </div>
     </footer>

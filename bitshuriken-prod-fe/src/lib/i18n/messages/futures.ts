@@ -3,6 +3,11 @@ import { defineMessages } from "./define";
 export const futures = defineMessages({
   en: {
     "futures.perp": "Perp",
+    "futures.beta.badge": "BETA",
+    "futures.beta.title": "Futures is in beta.",
+    "futures.beta.body": "Core order, margin, liquidation and funding paths are verified, but some updates arrive late: positions refresh by polling (about 5s), balances may lag right after a fill, and symbols listed at runtime cannot be traded until the next restart.",
+    "futures.beta.ref": "Details: ADR-076 (product stages).",
+    "futures.beta.dismiss": "Dismiss",
 
     // Order book
     "futures.orderBook.title": "Order Book",
@@ -178,6 +183,11 @@ export const futures = defineMessages({
   },
   ko: {
     "futures.perp": "무기한",
+    "futures.beta.badge": "BETA",
+    "futures.beta.title": "선물은 베타입니다.",
+    "futures.beta.body": "주문·마진·청산·펀딩 핵심 경로는 검증됐지만 일부 갱신이 늦게 옵니다. 포지션은 약 5초 폴링으로 갱신되고, 체결 직후 잔고가 지연될 수 있으며, 런타임에 상장된 심볼은 다음 재시작 전까지 거래할 수 없습니다.",
+    "futures.beta.ref": "자세히: ADR-076 (제품 단계).",
+    "futures.beta.dismiss": "닫기",
 
     "futures.orderBook.title": "호가창",
     "futures.orderBook.mark": "마크",
@@ -335,6 +345,11 @@ export const futures = defineMessages({
   },
   ja: {
     "futures.perp": "無期限",
+    "futures.beta.badge": "BETA",
+    "futures.beta.title": "先物はベータ版です。",
+    "futures.beta.body": "注文・証拠金・清算・資金調達の主要経路は検証済みですが、一部の更新が遅れます。ポジションは約5秒のポーリングで更新され、約定直後の残高が遅れることがあり、稼働中に上場した銘柄は次回再起動まで取引できません。",
+    "futures.beta.ref": "詳細: ADR-076（製品ステージ）。",
+    "futures.beta.dismiss": "閉じる",
 
     "futures.orderBook.title": "板情報",
     "futures.orderBook.mark": "マーク",
@@ -492,6 +507,11 @@ export const futures = defineMessages({
   },
   zh: {
     "futures.perp": "永续",
+    "futures.beta.badge": "BETA",
+    "futures.beta.title": "合约功能处于测试版。",
+    "futures.beta.body": "下单、保证金、强平和资金费率的核心路径已验证，但部分更新会延迟：持仓约每 5 秒轮询刷新，成交后余额可能短暂滞后，运行时上架的交易对在下次重启前无法交易。",
+    "futures.beta.ref": "详情：ADR-076（产品阶段）。",
+    "futures.beta.dismiss": "关闭",
 
     "futures.orderBook.title": "订单簿",
     "futures.orderBook.mark": "标记",

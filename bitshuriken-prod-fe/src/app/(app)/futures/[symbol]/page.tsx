@@ -4,6 +4,7 @@ import { FuturesOrderBook } from "@/components/futures/order-book";
 import { FuturesOrderForm } from "@/components/futures/order-form";
 import { FuturesRecentTrades } from "@/components/futures/recent-trades";
 import { FuturesPositionsPanel } from "@/components/futures/positions-panel";
+import { FuturesBetaBanner } from "@/components/futures/beta-banner";
 
 export default async function FuturesPage({
   params,
@@ -16,6 +17,7 @@ export default async function FuturesPage({
   return (
     // 터미널 높이를 뷰포트보다 크게 잡아 패널 행을 늘린다 — 넘치는 만큼 페이지가 스크롤된다.
     <div className="flex flex-col h-[calc(130vh-3rem)] min-h-[600px]">
+      <FuturesBetaBanner />
       <FuturesSymbolHeader symbol={upper} />
       <div
         className="grid gap-px bg-line flex-1 min-h-0"
