@@ -35,8 +35,3 @@ export function buildFeeds(wanted: SymbolSpec[], levels: number): { feed: Feed; 
   }
   return out;
 }
-
-/** A one-shot REST book reader per source, for the parity checker (no streaming). */
-export function restFeed(source: MirrorSource, market: Market, syms: FeedSymbol[]): Feed {
-  return makeFeed(source, market, syms, 5);
-}

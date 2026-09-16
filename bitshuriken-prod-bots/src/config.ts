@@ -40,8 +40,6 @@ export const config = {
   // integrity checker only (npm run check / scan) — the launcher never touches the DB.
   databaseUrl: process.env.DATABASE_URL ?? '',
   accounts: {
-    makerEmail: process.env.MAKER_EMAIL ?? 'maker-bot@bots.local',
-    takerEmail: process.env.TAKER_EMAIL ?? 'taker-bot@bots.local',
     password: process.env.BOT_PASSWORD ?? 'botpassword123',
   },
   // operator secret used to flag the maker/taker accounts rate-limit exempt on boot (ADR-066).

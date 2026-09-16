@@ -25,6 +25,3 @@ export async function rows<T extends pg.QueryResultRow = pg.QueryResultRow>(
   const r = await pool.query<T>(sql, params);
   return r.rows;
 }
-
-export const worst = (results: CheckResult[]): Status =>
-  results.some((r) => r.status === 'fail') ? 'fail' : results.some((r) => r.status === 'warn') ? 'warn' : 'pass';
