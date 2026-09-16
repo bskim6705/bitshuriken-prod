@@ -136,14 +136,6 @@ export interface AccountPosition {
   balances: Balance[];
 }
 
-export interface ListStatusEvent {
-  orderListId: string;
-  symbol: string;
-  status: OrderListStatus;
-  orders: { orderId: string; status: OrderStatus }[];
-  ts: number;
-}
-
 export interface Commission {
   makerBps: number;
   takerBps: number;

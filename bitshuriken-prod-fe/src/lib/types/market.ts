@@ -34,16 +34,6 @@ export interface Kline {
   isFinal: boolean;
 }
 
-export interface MiniTicker {
-  symbol: string;
-  lastPrice: string;
-  open: string;
-  high: string;
-  low: string;
-  volume: string;
-  quoteVolume: string;
-}
-
 export interface BookTicker {
   symbol: string;
   bidPrice: string | null;

@@ -2,7 +2,6 @@ import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { QueryProvider } from "@/lib/providers/query-provider";
 import { I18nProvider } from "@/lib/i18n/provider";
-import { SiteGate } from "@/components/site-gate";
 import "./globals.css";
 
 const geist = Geist({
@@ -39,9 +38,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" className={`${geist.variable} ${geistMono.variable}`}>
       <body className="min-h-screen bg-bg text-text">
         <I18nProvider>
-          <SiteGate>
-            <QueryProvider>{children}</QueryProvider>
-          </SiteGate>
+          <QueryProvider>{children}</QueryProvider>
         </I18nProvider>
       </body>
     </html>

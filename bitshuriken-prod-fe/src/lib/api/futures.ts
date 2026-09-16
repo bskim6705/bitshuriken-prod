@@ -1,22 +1,18 @@
 import { futuresApi, portalApi } from "./client";
-import type { BookTicker, DepthSnapshot, Kline, Ticker24h } from "@/lib/types/market";
+import type {   Kline } from "@/lib/types/market";
 import type { MyTrade } from "@/lib/types/trading";
 import type {
   CreateFuturesOrderReq,
-  FundingRate,
-  FuturesBalance,
+   FuturesBalance,
   FuturesExchangeInfo,
   FuturesIncome,
   FuturesIncomeType,
   FuturesOrder,
-  FuturesRecentTrade,
-  MarkPrice,
-  Position,
+    Position,
   PositionRow,
   TransferReq,
   TransferRes,
-  UpdatePositionReq,
-} from "@/lib/types/futures";
+  UpdatePositionReq } from "@/lib/types/futures";
 
 // BE wallet row (Prisma JSON 그대로) — FUTURES만 내려온다
 interface WalletRow {
@@ -104,27 +100,6 @@ export function fetchFuturesExchangeInfo(): Promise<FuturesExchangeInfo> {
   return futuresApi.get<FuturesExchangeInfo>("/futures/market/exchange-info");
 }
 
-export function fetchFuturesTickers(): Promise<Ticker24h[]> {
-  return futuresApi.get<Ticker24h[]>("/futures/market/tickers");
-}
-
-export function fetchFuturesDepth(symbol: string, limit?: number): Promise<DepthSnapshot> {
-  return futuresApi.get<DepthSnapshot>(`/futures/market/depth${buildQuery({ symbol, limit })}`);
-}
-
-export function fetchFuturesRecentTrades(
-  symbol: string,
-  limit?: number,
-): Promise<FuturesRecentTrade[]> {
-  return futuresApi.get<FuturesRecentTrade[]>(
-    `/futures/market/recent-trades${buildQuery({ symbol, limit })}`,
-  );
-}
-
-export function fetchFuturesBookTicker(symbol: string): Promise<BookTicker> {
-  return futuresApi.get<BookTicker>(`/futures/market/book-ticker${buildQuery({ symbol })}`);
-}
-
 export function fetchFuturesKlines(
   symbol: string,
   interval: string,
@@ -132,14 +107,6 @@ export function fetchFuturesKlines(
   endTime?: number,
 ): Promise<Kline[]> {
   return futuresApi.get<Kline[]>(`/futures/market/klines${buildQuery({ symbol, interval, limit, endTime })}`);
-}
-
-export function fetchMarkPrice(symbol: string): Promise<MarkPrice> {
-  return futuresApi.get<MarkPrice>(`/futures/market/mark-price${buildQuery({ symbol })}`);
-}
-
-export function fetchFundingRate(symbol: string, limit?: number): Promise<FundingRate[]> {
-  return futuresApi.get<FundingRate[]>(`/futures/market/funding-rate${buildQuery({ symbol, limit })}`);
 }
 
 // ---- user data stream listenKey ----

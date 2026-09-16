@@ -11,18 +11,15 @@ import {
   fetchCommission,
   fetchMyTrades,
   fetchOpenOrders,
-  fetchOrderLists,
   fetchOrders,
-  type HistoryParams,
-} from "@/lib/api/account";
+  type HistoryParams } from "@/lib/api/account";
 import {
   cancelAllOrders,
   cancelOco,
   cancelOrder,
   createOco,
   createOrder,
-  type CreateOcoRes,
-} from "@/lib/api/trading";
+  type CreateOcoRes } from "@/lib/api/trading";
 import type {
   AccountPosition,
   Balance,
@@ -32,9 +29,7 @@ import type {
   ExecutionReport,
   MyTrade,
   Order,
-  OrderList,
-  OrderStatus,
-} from "@/lib/types/trading";
+   OrderStatus } from "@/lib/types/trading";
 
 const BALANCES_KEY = ["spot", "balances"] as const;
 
@@ -227,26 +222,6 @@ export function useMyTrades(params: HistoryParams = {}) {
         Number(report.executedQty) > 0;
       if (!filled) return;
       debouncedInvalidate(qc, ["spot", "trades"]);
-    });
-  }, [qc]);
-
-  return query;
-}
-
-export function useOrderLists() {
-  useUserStream();
-  const { data: user } = useCurrentUser();
-  const qc = useQueryClient();
-
-  const query = useQuery<OrderList[]>({
-    queryKey: ["spot", "orderLists"],
-    queryFn: fetchOrderLists,
-    enabled: user != null,
-  });
-
-  useEffect(() => {
-    return getUserWsClient().on("listStatus", () => {
-      debouncedInvalidate(qc, ["spot", "orderLists"]);
     });
   }, [qc]);
 

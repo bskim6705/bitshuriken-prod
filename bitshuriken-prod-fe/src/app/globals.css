@@ -13,7 +13,6 @@
   --color-accent: #fcd535;
   --color-accent-hover: #f0b90b;
   --color-up: #0ecb81;
-  --color-up-soft: #103b2b;
   --color-down: #f6465d;
   --color-down-soft: #3b1721;
 
@@ -73,13 +72,6 @@ body {
 @utility tnum {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum";
-}
-
-@utility label-xs {
-  font-size: 11px;
-  line-height: 1.3;
-  color: var(--color-text-dim);
-  font-weight: 400;
 }
 
 /* ---- Scalar API reference: embed in a bounded, self-scrolling region ----

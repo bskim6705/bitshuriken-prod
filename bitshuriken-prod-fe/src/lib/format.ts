@@ -20,10 +20,6 @@ export function formatPrice(value: string | null): string {
   return value ?? "—";
 }
 
-export function formatQty(value: string | null): string {
-  return value ?? "—";
-}
-
 export function formatTime(ts: number): string {
   const d = new Date(ts);
   const hh = d.getHours().toString().padStart(2, "0");

@@ -1,5 +1,4 @@
 import type { Locale } from "../config";
-import { gate } from "./gate";
 import { common } from "./common";
 import { widgets } from "./widgets";
 import { chrome } from "./chrome";
@@ -14,10 +13,10 @@ import { portfolio } from "./portfolio";
 import { account } from "./account";
 import { orders } from "./orders";
 import { admin } from "./admin";
+import { fly } from "./fly";
 
 // 영역 모듈을 로케일별 단일 사전으로 병합. en 스프레드로 전체 키 유니온을 도출한다.
 const en = {
-  ...gate.en,
   ...common.en,
   ...widgets.en,
   ...chrome.en,
@@ -32,6 +31,7 @@ const en = {
   ...account.en,
   ...orders.en,
   ...admin.en,
+  ...fly.en,
 };
 
 export type TranslationKey = keyof typeof en;
@@ -39,7 +39,6 @@ export type TranslationKey = keyof typeof en;
 export const dictionaries: Record<Locale, Record<TranslationKey, string>> = {
   en,
   ko: {
-    ...gate.ko,
     ...common.ko,
     ...widgets.ko,
     ...chrome.ko,
@@ -54,9 +53,9 @@ export const dictionaries: Record<Locale, Record<TranslationKey, string>> = {
     ...account.ko,
     ...orders.ko,
     ...admin.ko,
+  ...fly.ko,
   },
   ja: {
-    ...gate.ja,
     ...common.ja,
     ...widgets.ja,
     ...chrome.ja,
@@ -71,9 +70,9 @@ export const dictionaries: Record<Locale, Record<TranslationKey, string>> = {
     ...account.ja,
     ...orders.ja,
     ...admin.ja,
+  ...fly.ja,
   },
   zh: {
-    ...gate.zh,
     ...common.zh,
     ...widgets.zh,
     ...chrome.zh,
@@ -88,5 +87,6 @@ export const dictionaries: Record<Locale, Record<TranslationKey, string>> = {
     ...account.zh,
     ...orders.zh,
     ...admin.zh,
+  ...fly.zh,
   },
 };

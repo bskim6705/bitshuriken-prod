@@ -1,5 +1,5 @@
 import { api } from "./client";
-import type { Balance, Commission, MyTrade, Order, OrderList } from "@/lib/types/trading";
+import type { Balance, Commission, MyTrade, Order } from "@/lib/types/trading";
 
 // BE wallet row (Prisma JSON 그대로) — 모든 marketType의 지갑이 내려온다
 interface WalletRow {
@@ -48,10 +48,6 @@ export function fetchOrders(params: HistoryParams): Promise<Order[]> {
 
 export function fetchMyTrades(params: HistoryParams): Promise<MyTrade[]> {
   return api.get<MyTrade[]>(`/spot/account/trades${buildQuery({ ...params })}`);
-}
-
-export function fetchOrderLists(): Promise<OrderList[]> {
-  return api.get<OrderList[]>("/spot/account/order-lists");
 }
 
 export function fetchCommission(): Promise<Commission> {

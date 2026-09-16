@@ -6,14 +6,12 @@ import { useWsStream } from "@/lib/ws/hooks";
 import { getWsClient } from "@/lib/ws/client";
 import { fetchExchangeInfo, fetchKlines } from "@/lib/api/market";
 import type {
-  BookTicker,
-  DepthSnapshot,
+   DepthSnapshot,
   ExchangeInfo,
   Kline,
   SymbolInfo,
   Ticker24h,
-  WsTrade,
-} from "@/lib/types/market";
+  WsTrade } from "@/lib/types/market";
 
 export function useAllTickers(): Ticker24h[] | null {
   return useWsStream<Ticker24h[]>("!ticker@arr");
@@ -170,12 +168,4 @@ export function useKlines(symbol: string | null, interval: string | null): Kline
   }, [symbol, interval]);
 
   return klines;
-}
-
-export function useBookTicker(symbol: string | null): BookTicker | null {
-  const stream = useMemo(
-    () => (symbol ? `${symbol.toLowerCase()}@bookTicker` : null),
-    [symbol],
-  );
-  return useWsStream<BookTicker>(stream);
 }

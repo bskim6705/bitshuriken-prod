@@ -16,20 +16,3 @@ export function InlineError({
     </p>
   );
 }
-
-/** Non-error status (loading/success) — announced politely (role=status). */
-export function StatusText({
-  id,
-  className,
-  children,
-}: {
-  id?: string;
-  className?: string;
-  children: ReactNode;
-}) {
-  return (
-    <p id={id} role="status" aria-live="polite" className={`text-[12px] text-text-dim ${className ?? ""}`}>
-      {children}
-    </p>
-  );
-}

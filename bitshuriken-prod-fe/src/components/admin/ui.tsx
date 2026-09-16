@@ -70,26 +70,6 @@ export function Th({ children, first }: { children?: ReactNode; first?: boolean 
   );
 }
 
-/** Shimmer placeholder rows while a table loads (respects reduced-motion via globals). */
-export function SkeletonRows({ cols, rows = 5 }: { cols: number; rows?: number }) {
-  return (
-    <>
-      {Array.from({ length: rows }).map((_, r) => (
-        <tr key={r} className="border-b border-line last:border-b-0">
-          {Array.from({ length: cols }).map((_, c) => (
-            <td key={c} className="px-3 py-2">
-              <div
-                className="h-3 bg-raised animate-pulse"
-                style={{ width: `${40 + ((r + c) % 4) * 15}%` }}
-              />
-            </td>
-          ))}
-        </tr>
-      ))}
-    </>
-  );
-}
-
 export function EmptyRow({ cols, label }: { cols: number; label: string }) {
   return (
     <tr>
