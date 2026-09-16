@@ -1,6 +1,6 @@
 # ADR-048: 문서 내 AI 채팅 제거 + 읽기 전용 문서 MCP 서버
 
-> **[bitshuriken-prod fork note, 2026-07-03]** `bitshuriken-v2-mcp` 서버는 이 포크에 포함되지 않는다(아카이브에 보존). §"Ask AI 제거"와 API 문서를 백엔드 description으로 이관한 결정(ADR-046의 배경)은 이 포크에서도 유효하다.
+> **[bitshuriken-prod fork note, 2026-07-03]** `bitshuriken-v2-mcp` 서버는 이 포크에 포함되지 않는다(아카이브에 보존). **(2026-09-16 갱신: prod 전용 포트 `bitshuriken-prod-mcp` 신설 — [ADR-074](074-prod-docs-mcp-server.md).)** §"Ask AI 제거"와 API 문서를 백엔드 description으로 이관한 결정(ADR-046의 배경)은 이 포크에서도 유효하다.
 
 ## Status
 Accepted (2026-06-15)
