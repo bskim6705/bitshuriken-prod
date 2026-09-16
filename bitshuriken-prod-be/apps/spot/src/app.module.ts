@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
-import { AppController } from './app.controller';
 
 // infra
 import { PrismaModule } from '@app/infra/prisma/prisma.module';
@@ -53,6 +52,5 @@ import { TickerControlModule } from './consumer/ticker-control.module';
     MarketDataModule,
     TickerControlModule,
   ],
-  controllers: [AppController],
 })
 export class AppModule {}

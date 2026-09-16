@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { MarketType, Prisma } from '@prisma/client';
 import { PrismaService } from '@app/infra/prisma/prisma.service';
 import { LedgerService } from './ledger.service';
-import { DriftRow, ScaledBalance, WalletKeyParts, ledgerKey } from './ledger.types';
+import { DriftRow, ScaledBalance, WalletKeyParts, ledgerKey, parseLedgerKey } from './ledger.types';
 import { formatScaled, toScaledBigint } from './scaled';
 
 /**
@@ -66,7 +66,7 @@ export class DriftChecker {
     for (const [key, led] of ledgerSnap) {
       if (seen.has(key)) continue;
       if (led.balance === 0n && led.locked === 0n) continue; // 빈 슬롯은 드리프트 아님
-      const parts = parseKey(key);
+      const parts = parseLedgerKey(key);
       if (owned.length > 0 && !owned.includes(parts.marketType)) continue;
       drifts.push(this.row(parts, led, null));
     }
@@ -101,13 +101,3 @@ function diffSig(d: DriftRow): string {
   return `${d.balanceDiff}|${d.lockedDiff}`;
 }
 
-/** ledgerKey 역파싱 — `${userId} ${assetSymbol} ${marketType}`. marketType은 마지막 토큰. */
-function parseKey(key: string): WalletKeyParts {
-  const idx2 = key.lastIndexOf(' ');
-  const idx1 = key.lastIndexOf(' ', idx2 - 1);
-  return {
-    userId: key.slice(0, idx1),
-    assetSymbol: key.slice(idx1 + 1, idx2),
-    marketType: key.slice(idx2 + 1) as MarketType,
-  };
-}

@@ -6,19 +6,14 @@ import { JournalInput } from './ledger.types';
 
 /**
  * sourceKey 규칙 (기존 SettlementEvent 스타일과 일관 — dust:{orderId}, frefund:{orderId} 등).
- * 멱등 키이며 BalanceJournal.sourceKey @unique가 이중 INSERT를 차단한다. 후속 포드(S/U/P)가
- * 배선 시 여기서 키를 생성해 저널↔기존 정산 이벤트의 sourceKey 공간이 충돌하지 않게 한다.
- * (place-lock 등 신규 저널 대상은 새 접두사, 기존 정산 leg는 원 sourceKey 재사용 가능.)
+ * 멱등 키이며 BalanceJournal.sourceKey @unique가 이중 INSERT를 차단한다. 정산 leg는 원 sourceKey를
+ * 그대로 재사용하고, 신규 저널 대상(place-lock·이체·조정·마진 등)만 여기 접두사를 쓴다.
  */
 export const SourceKey = {
   spotPlaceLock: (orderId: string) => `lock:${orderId}`,
   spotOcoLock: (listId: string) => `lock:list:${listId}`,
-  spotTrade: (tradeId: string) => tradeId, // 기존 TRADE 이벤트와 동일
-  dustRefund: (orderId: string) => `dust:${orderId}`,
-  listRefund: (listId: string) => `listref:${listId}`,
   futuresPlaceLock: (orderId: string) => `lock:${orderId}`,
   futuresRefund: (orderId: string) => `frefund:${orderId}`,
-  funding: (fundingTime: string, userId: string) => `funding:${fundingTime}:${userId}`,
   transferOut: (fundingTxId: string) => `xferout:${fundingTxId}`,
   transferIn: (fundingTxId: string) => `xferin:${fundingTxId}`,
   deposit: (fundingTxId: string) => `deposit:${fundingTxId}`,

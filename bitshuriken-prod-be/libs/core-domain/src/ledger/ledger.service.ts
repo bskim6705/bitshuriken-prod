@@ -170,12 +170,6 @@ export class LedgerService {
     this.afterMutate(key, cur);
   }
 
-  /** 해제(unfreeze) 편의 — locked→balance (환불/취소 잔여). apply의 특수형. */
-  release(parts: WalletKeyParts, amount: Decimal.Value): void {
-    const amt = toScaledBigint(amount);
-    this.apply(parts, amt, -amt);
-  }
-
   /**
    * 저널 엔트리 멱등 적용 (JournalTailer·boot replay·커밋 직후 로컬 반영 공용).
    * 이미 본 sourceKey면 no-op(false) — reserve로 선반영된 place-lock 엔트리나 크래시 재수신을
@@ -196,11 +190,6 @@ export class LedgerService {
 
   hasApplied(sourceKey: string): boolean {
     return this.applied.has(sourceKey);
-  }
-
-  /** 워터마크가 넘어간 seq의 sourceKey는 tailer가 다시 질의하지 않으므로 pruning 가능(메모리 상한). */
-  forgetApplied(sourceKey: string): void {
-    this.applied.delete(sourceKey);
   }
 
   /** boot replay 시작 시 전 상태 초기화 — replay가 저널로부터 결정적으로 재구성(멱등). */

@@ -31,16 +31,7 @@ export function outboundTopic(market: MarketType): string {
   return `match.${MARKET_SLUG[market]}.out`;
 }
 
-/** Orderbook diff stream용 별도 topic. */
-export function bookTopic(market: MarketType): string {
-  return `match.${MARKET_SLUG[market]}.book`;
-}
-
 /** Ticker 라이프사이클 컨트롤용 log-compacted topic. */
 export function controlTopic(market: MarketType): string {
   return `match.${MARKET_SLUG[market]}.control`;
 }
-
-export const ALL_OUTBOUND_TOPICS: string[] = (Object.keys(MARKET_SLUG) as MarketType[]).map(
-  outboundTopic,
-);

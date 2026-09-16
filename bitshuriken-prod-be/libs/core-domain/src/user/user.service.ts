@@ -67,13 +67,6 @@ export class UserService {
     return user;
   }
 
-  findOne(id: string) {
-    return this.prisma.user.findUnique({
-      where: { id },
-      select: { id: true, email: true, createdAt: true },
-    });
-  }
-
   /**
    * 수수료 요율 조회 — feeTier → 코드 테이블(fee-tiers.ts)의 마켓별 요율 (ADR-073).
    * tier만 60s TTL 캐시. 유저 없음/범위 밖 tier는 throw — 기본값 대체 금지.

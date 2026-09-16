@@ -208,12 +208,6 @@ export class MarkPriceService implements OnModuleInit, OnModuleDestroy {
     return ring;
   }
 
-  peekPremiumSamples(symbol: string): readonly Decimal[] {
-    const ring = this.premiumRing.get(symbol);
-    if (!ring) throw new Error(`unknown futures symbol: ${symbol}`);
-    return [...ring];
-  }
-
   nextFundingTime(): Date {
     return new Date((Math.floor(Date.now() / FUNDING_INTERVAL_MS) + 1) * FUNDING_INTERVAL_MS);
   }
