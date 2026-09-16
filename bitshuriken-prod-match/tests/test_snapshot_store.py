@@ -83,7 +83,7 @@ class StubProducer:
 
 
 def make_lane(symbol="BTCUSDT", partition=0) -> Lane:
-    book = OrderBook(symbol=symbol, partition=partition, qty_step=10**3, price_tick=10**6)
+    book = OrderBook(symbol=symbol, qty_step=10**3)
     return Lane(
         topic_in=INBOUND,
         topic_out="match.spot.out",
@@ -110,7 +110,7 @@ def resting(oid: str, side: OrderSide, price: int, qty: int) -> Order:
 
 def snapshot_of(orders: list[Order], offset: int) -> SnapshotMsg:
     """별도 book에 주문을 쌓아 스냅샷 생성 — 복원 비교 기준."""
-    book = OrderBook(symbol="BTCUSDT", partition=0, qty_step=10**3, price_tick=10**6)
+    book = OrderBook(symbol="BTCUSDT", qty_step=10**3)
     for o in orders:
         book.add(o)
     return SnapshotMsg.from_book(book, offset)

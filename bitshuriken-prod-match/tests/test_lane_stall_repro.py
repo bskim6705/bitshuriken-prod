@@ -100,7 +100,7 @@ def engine() -> MatchEngine:
 @pytest.fixture
 def restored_lane(engine) -> Lane:
     """09:17 스냅샷 복원 상태 재현: resting 매수/매도 + 높은 last_offset/seq, dirty clear."""
-    lane = build_lane("spot", "ZECUSDT", 1, price_precision=2, qty_precision=3)
+    lane = build_lane("spot", "ZECUSDT", 1, qty_precision=3)
     # resting SELL maker id "ZID" @500, resting BUY @499 (stale ~10:14 book 축소판)
     engine.submit_new_order(
         lane.book,

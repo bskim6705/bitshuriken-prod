@@ -10,9 +10,7 @@ from typing import Iterable
 from engine.order import Order, OrderSide, OrderType, TimeInForce
 from engine.trade import Trade
 from messaging.topics import (
-    OP_CANCEL_ORDER,
     OP_DEPTH_DIFF,
-    OP_NEW_ORDER,
     OP_ORDER_UPDATE,
     OP_TRADE,
 )
@@ -204,9 +202,4 @@ __all__ = [
     "OrderUpdateMsg",
     "DepthDiffMsg",
     "op_of",
-    "OP_NEW_ORDER",
-    "OP_CANCEL_ORDER",
-    "OP_TRADE",
-    "OP_ORDER_UPDATE",
-    "OP_DEPTH_DIFF",
 ]

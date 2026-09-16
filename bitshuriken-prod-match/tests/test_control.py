@@ -72,7 +72,7 @@ def test_read_control_defs_latest_per_symbol():
 
     assert hw == 3
     assert set(defs) == {"BTCUSDT", "ETHUSDT"}
-    assert defs["BTCUSDT"] == TickerAdd("BTCUSDT", 0, 1, 4)  # offset 2가 최신
+    assert defs["BTCUSDT"] == TickerAdd("BTCUSDT", 0, 4)  # offset 2가 최신
     # 처음부터(low=0) 읽도록 assign
     assert consumer.assignments[0] == [(topic, CONTROL_PARTITION, 0)]
 

@@ -30,14 +30,12 @@ class Lane:
 
 
 def build_lane(
-    market: str, symbol: str, partition: int, price_precision: int, qty_precision: int
+    market: str, symbol: str, partition: int, qty_precision: int
 ) -> Lane:
     """ticker 메타로 Lane 1개 구성 — config 로드와 런타임 추가가 공유."""
     book = OrderBook(
         symbol=symbol,
-        partition=partition,
         qty_step=SCALE // (10**qty_precision),
-        price_tick=SCALE // (10**price_precision),
     )
     return Lane(
         topic_in=inbound_topic(market),
@@ -64,7 +62,7 @@ class LaneRegistry:
 
         lanes = [
             build_lane(
-                t["market"], t["symbol"], t["partition"], t["pricePrecision"], t["qtyPrecision"]
+                t["market"], t["symbol"], t["partition"], t["qtyPrecision"]
             )
             for t in config["tickers"]
         ]

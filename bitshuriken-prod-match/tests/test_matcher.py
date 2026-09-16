@@ -14,7 +14,6 @@ from engine.orderbook import OrderBook
 
 SCALE = 10**8
 QTY_STEP = SCALE // 10**3  # qtyPrecision=3
-PRICE_TICK = SCALE // 10**1  # pricePrecision=1
 
 _ids = itertools.count(1)
 
@@ -50,7 +49,7 @@ def make_order(
 
 @pytest.fixture
 def book() -> OrderBook:
-    return OrderBook(symbol="BTCUSDT", partition=0, qty_step=QTY_STEP, price_tick=PRICE_TICK)
+    return OrderBook(symbol="BTCUSDT", qty_step=QTY_STEP)
 
 
 @pytest.fixture

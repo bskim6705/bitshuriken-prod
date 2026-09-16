@@ -11,10 +11,6 @@ OP_DEPTH_DIFF = "DPD"
 OP_ADD_TICKER = "ADD"
 CONTROL_PARTITION = 0  # control 토픽은 1 partition (compacted, key=symbol)
 
-# Market slugs (Prisma MarketType의 lowercase)
-MARKET_SPOT = "spot"
-MARKET_FUTURES = "futures"
-
 
 def inbound_topic(market: str) -> str:
     return f"match.{market}.in"

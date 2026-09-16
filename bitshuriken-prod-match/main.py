@@ -49,7 +49,7 @@ def _add_lane_live(
     assigned_in: set[tuple[str, int]],
 ) -> None:
     """control 토픽 add를 런타임에 반영 — lane in-memory insert(빈 책, Kafka 재배정 없음)."""
-    lane = build_lane(market, add.symbol, add.partition, add.price_precision, add.qty_precision)
+    lane = build_lane(market, add.symbol, add.partition, add.qty_precision)
     if not registry.add(lane):
         return  # 이미 존재(부팅 흡수분/중복)
     lane.last_snapshot_ms = now_ms()
@@ -88,7 +88,7 @@ def main() -> None:
             continue
         for add in ctrl_defs.values():
             registry.add(
-                build_lane(m, add.symbol, add.partition, add.price_precision, add.qty_precision)
+                build_lane(m, add.symbol, add.partition, add.qty_precision)
             )
         control_topics[control_topic(m)] = m
         extra_assignments.append((control_topic(m), CONTROL_PARTITION, ctrl_hw))

@@ -14,21 +14,14 @@ TERMINATED_MEMORY_CAPACITY = 50_000
 class OrderBook:
     """단일 ticker의 가격-시간 우선 호가창.
 
-    1 partition = 1 ticker이므로 market 정보는 보유하지 않는다.
+    market·partition은 Lane이 보유한다(여러 ticker가 한 partition 버킷을 공유). 가격 tick은
+    검증하지 않는다(입력 검증은 BE 몫) — qty_step만 quote-driven MARKET의 수량 floor에 쓴다.
     """
 
-    def __init__(
-        self,
-        symbol: str,
-        partition: int,
-        qty_step: int,
-        price_tick: int,
-    ):
+    def __init__(self, symbol: str, qty_step: int):
         self.symbol = symbol
-        self.partition = partition
-        # qty_step / price_tick은 int * 10^8 단위. 예: qtyPrecision=5 -> qty_step=10^3
+        # qty_step은 int * 10^8 단위. 예: qtyPrecision=5 -> qty_step=10^3
         self.qty_step = qty_step
-        self.price_tick = price_tick
         self.seq: int = 0  # 모든 변경마다 +1, L2 delta publish 시 사용
 
         # price (int) -> OrderedDict[order_id, Order]

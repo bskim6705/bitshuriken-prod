@@ -40,7 +40,6 @@ def test_load_lanes_and_lookup(tmp_path):
     assert lane.partition == 0
     assert lane.book.symbol == "BTCUSDT"
     assert lane.book.qty_step == 10**3  # 10^(8-5)
-    assert lane.book.price_tick == 10**6  # 10^(8-2)
     assert lane.last_offset == -1 and lane.dirty is False
 
     # 같은 버킷의 다른 symbol도 독립 lane
@@ -53,19 +52,19 @@ def test_registry_add_live_and_markets():
     # 부팅 시드 없이 직접 구성 — spot/futures 혼재
     registry = LaneRegistry(
         [
-            build_lane("spot", "BTCUSDT", 0, 2, 5),
-            build_lane("futures", "ETHUSDT", 2, 2, 3),
+            build_lane("spot", "BTCUSDT", 0, 5),
+            build_lane("futures", "ETHUSDT", 2, 3),
         ]
     )
     assert registry.markets() == ["spot", "futures"]  # 정의 순서, 중복 제거
 
     lanes = registry.all()  # main의 lanes 참조와 동일 객체여야 함
-    added = registry.add(build_lane("spot", "NEWUSDT", 3, 2, 4))
+    added = registry.add(build_lane("spot", "NEWUSDT", 3, 4))
     assert added is True
     assert registry.get("NEWUSDT").partition == 3
     assert registry.get("NEWUSDT").topic_in == "match.spot.in"
     assert lanes is registry.all() and len(lanes) == 3  # append가 같은 리스트에 반영
 
     # 중복은 무시(False) — 멱등
-    assert registry.add(build_lane("spot", "NEWUSDT", 3, 2, 4)) is False
+    assert registry.add(build_lane("spot", "NEWUSDT", 3, 4)) is False
     assert len(registry) == 3

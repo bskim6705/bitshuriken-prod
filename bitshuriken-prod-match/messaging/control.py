@@ -17,7 +17,6 @@ _IDLE_BREAK = 10  # 연속 빈 poll — 컴팩션으로 HW 직전이 비어도 �
 class TickerAdd:
     symbol: str
     partition: int
-    price_precision: int
     qty_precision: int
 
     @classmethod
@@ -25,7 +24,6 @@ class TickerAdd:
         return cls(
             symbol=d["symbol"],
             partition=int(d["partition"]),
-            price_precision=int(d["pricePrecision"]),
             qty_precision=int(d["qtyPrecision"]),
         )
 

@@ -13,7 +13,6 @@ from schemas.snapshot import SnapshotMsg
 
 SCALE = 10**8
 QTY_STEP = SCALE // 10**3  # qtyPrecision=3
-PRICE_TICK = SCALE // 10**1  # pricePrecision=1
 
 
 def n(s: str) -> int:
@@ -23,7 +22,7 @@ def n(s: str) -> int:
 
 
 def make_book() -> OrderBook:
-    return OrderBook(symbol="BTCUSDT", partition=0, qty_step=QTY_STEP, price_tick=PRICE_TICK)
+    return OrderBook(symbol="BTCUSDT", qty_step=QTY_STEP)
 
 
 def make_order(

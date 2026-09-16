@@ -22,7 +22,6 @@ from engine.orderbook import OrderBook
 
 SCALE = 10**8
 QTY_STEP = SCALE // 10**3
-PRICE_TICK = SCALE // 10**1
 
 _ids = itertools.count(1)
 
@@ -59,7 +58,7 @@ def order(
 
 @pytest.fixture
 def book() -> OrderBook:
-    return OrderBook(symbol="BTCUSDT", partition=0, qty_step=QTY_STEP, price_tick=PRICE_TICK)
+    return OrderBook(symbol="BTCUSDT", qty_step=QTY_STEP)
 
 
 @pytest.fixture
@@ -150,7 +149,7 @@ def test_distinct_fresh_id_still_matches_after_a_termination(engine, book):
 def test_terminated_memory_is_capacity_bounded(engine):
     from engine.orderbook import TERMINATED_MEMORY_CAPACITY, OrderBook
 
-    b = OrderBook(symbol="X", partition=0, qty_step=QTY_STEP, price_tick=PRICE_TICK)
+    b = OrderBook(symbol="X", qty_step=QTY_STEP)
     b.remember_terminated("oldest")
     for i in range(TERMINATED_MEMORY_CAPACITY):
         b.remember_terminated(f"id-{i}")
