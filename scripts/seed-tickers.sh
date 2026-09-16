@@ -2,15 +2,15 @@
 # Seed all tickers into prod via the admin API (no repo clone on the server).
 # Runs on THIS Mac (reads the local match config) and POSTs to the prod portal.
 #
-#   ADMIN_API_SECRET=... ./seed-tickers.sh            # create (status=TRADING)
-#   ADMIN_API_SECRET=... DRY=1 ./seed-tickers.sh      # print bodies only, no POST
+#   ADMIN_API_SECRET=... ./scripts/seed-tickers.sh            # create (status=TRADING)
+#   ADMIN_API_SECRET=... DRY=1 ./scripts/seed-tickers.sh      # print bodies only, no POST
 #
 # Requires: the X-Admin-Secret must equal ADMIN_API_SECRET in the server .env.prod.
 set -euo pipefail
 
 : "${ADMIN_API_SECRET:?set ADMIN_API_SECRET (must match server .env.prod)}"
 BASE="${BASE:-https://bitshuriken.com/api}"
-CFG="${CFG:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bitshuriken-prod-match/config}"
+CFG="${CFG:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bitshuriken-prod-match/config}"
 DRY="${DRY:-0}"
 DELAY="${DELAY:-0.15}"   # inter-request pause to avoid rate-limit (429); raise if you see 429s
 
