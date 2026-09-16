@@ -11,3 +11,7 @@
 
 # 개인 학습·면접 준비 노트 (공개 리포 제외)
 /study/
+
+# .env 예시는 추적한다 (값은 전부 플레이스홀더)
+!.env.example
+!.env.prod.example
