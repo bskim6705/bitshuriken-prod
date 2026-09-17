@@ -1,123 +1,166 @@
-# bitshuriken-prod
+# Bitshuriken
 
-Bitshuriken — spot·futures 시뮬레이션 거래소 모노레포.
-`bitshuriken-v2`의 시맨틱 포크로, 거래소 코어는 spot/futures/portal에 집중하고
-bots/agents는 외부 사용자 표면을 사용하는 전략 테스트 서비스로 함께 둔다
-(경위: [ADR-065](docs/adr/065-production-fork.md), [ADR-071](docs/adr/071-git-monorepo.md)).
+현물과 USDT 무기한선물 거래를 지원하는 시뮬레이션 거래소입니다.
+주문 접수부터 매칭, 체결, 잔고 정산까지 구현하고 있으며, 자체 매칭엔진에서 거래 전략과 봇을 실행하고 검증하는 것을 목표로 개발하고 있습니다.
 
-제품 단계([ADR-076](docs/adr/076-product-maturity-stages-and-blast-radius.md)): **spot·portal GA, futures beta**.
-선물은 핵심 경로가 검증됐지만 알려진 한계가 있고(FE 배너 참조), 선물 장애가 spot·portal로 번지지
-않도록 프로세스·토픽·컨슈머 그룹·기동 의존을 분리한다(격리 매트릭스는 ADR-076 §5).
+Binance·Upbit의 실시간 호가를 미러링하는 봇과 주문·체결·잔고를 대조하는 검증 도구를 함께 제공합니다.
 
-## 무엇을 만들었나
+## 주요 기능
 
-Binance 구조를 따라 만든 **현물 + USDT 무기한선물 시뮬레이션 거래소**다. 목적은 전략과 봇을 실제 매칭엔진 위에서 검증하는 것 — Binance·Upbit의 실시간 호가를 미러링해 실시장 부하를 넣고, 금전 불변식 하네스와 kill -9 리플레이 드릴로 정합성을 확인했다.
+- **현물·선물 거래:** 지정가·시장가 주문, 주문 취소, 부분 체결과 잔량 처리. 선물은 마진·포지션·펀딩·청산 기능을 포함합니다.
+- **매칭엔진:** 가격·시간 우선으로 주문을 처리하며, 주문장 스냅샷과 Kafka 메시지를 이용해 중단 후 상태를 복원합니다.
+- **잔고·정산:** 주문 접수 시 가용 잔고를 확인하고 예약합니다. 체결 결과는 이벤트로 기록해 별도 정산 프로세스에서 반영합니다.
+- **거래 화면:** 차트·주문장·체결 내역과 계정 관리 화면을 제공하며, WebSocket으로 시장 데이터를 전달합니다.
+- **전략 테스트:** 시장 데이터 미러링, 부하 생성, 정합성 검사, 백테스트와 라이브 전략 실행 도구를 포함합니다.
 
-- **엔진**(Python): 가격-시간 우선 매칭, 심볼 해시 버킷 파티션(P=6)에 여러 티커를 태우는 Lane 패턴, 30초 compacted 스냅샷 + inbound WAL replay로 복구, 결정적 trade id.
-- **백엔드**(Nest.js, 프로세스 4개): 접수·잠금은 인메모리 원장 + append-only 저널(응답은 저널 커밋 후), 정산은 이벤트 로그를 별도 프로세스의 워커가 `seq` 순으로 적용, poison 이벤트는 DLQ로 격리.
-- **프론트엔드**(Next.js): 거래소 컨벤션의 터미널 UI, WS 스트림, 4개 언어.
-- **봇·에이전트**: 미러링 마켓메이커·테이커, 정합성 체커(F1~F5), 부하 생성기, 백테스트·라이브 전략 실행기.
+## 현재 상태와 한계
 
-| 항목 | 값 |
-| --- | --- |
-| 코드 | BE 24k LOC(TS) · 엔진 1.4k(Python) · FE 22k(TS/TSX) |
-| 문서 | ADR 68건(번호 001~078, 050~059 결번 — 결정이 바뀐 이유까지) · 교정 기록 33건 · 검증 리포트 16건 |
-| 테스트 | jest 42 suites / 419 · pytest 179 + xfail 1 · CI: `.github/workflows/ci.yml` |
-| 정합성 | kill -9 리플레이 22,235건·31,999건 대조 불일치 0 · 정합성 체커 F1~F5 0 fail |
-| 미러 충실도 | BTCUSDT 호가 p99 편차 2.68bps, 선물 ETHUSDT 6.29bps(rec150/TPS20, 10분) |
-| 처리량 | 단일 프로세스 유효 100~120 TPS → 정산 프로세스 분리 후 7심볼 미러 동반 지속 |
+프로젝트 내 제품 단계는 현물·계정 기능 GA, 선물 beta로 구분합니다. 이는 시뮬레이션 서비스의 개발 단계이며, 거래소 전체의 고가용성을 보장한다는 의미는 아닙니다.
 
-## 설계 결정 — 읽는 순서
+- 현재 배포는 단일 호스트를 기준으로 합니다. 잔고 원장이 프로세스 메모리에 있어 API 인스턴스를 단순히 늘리는 방식의 확장은 지원하지 않습니다.
+- 매칭엔진의 스냅샷 복원과 메시지 재처리를 구현했지만, 대기 서버로 자동 전환하는 HA 구성은 아직 없습니다.
+- 정산 프로세스 분리 이후 일부 잔고·포지션 변경 알림은 WebSocket으로 전달되지 않아 클라이언트가 주기적으로 조회합니다.
+- 현물과 선물은 프로세스와 토픽을 구분하지만, 공유 정산 프로세스 등 아직 장애가 서로 영향을 줄 수 있는 지점이 남아 있습니다.
 
-결정보다 **결정이 바뀐 이유**를 남기려 했다. 이 여섯 개면 뼈대가 보인다.
+세부 내용은 [제품 단계와 장애 격리](docs/adr/076-product-maturity-stages-and-blast-radius.md), [정산 프로세스 분리](docs/adr/077-settlement-process-split-and-graceful-shutdown.md), [알려진 문제](docs/specs/refactor-observations.md)에 정리되어 있습니다.
 
-1. [ADR-013](docs/adr/013-match-engine-lane-architecture.md) 엔진 Lane 패턴 → [ADR-063](docs/adr/063-match-partition-buckets-and-stw.md) 해시 버킷 파티션 → [ADR-064](docs/adr/064-dynamic-ticker-onboarding.md) 런타임 상장
-2. [ADR-034](docs/adr/034-match-engine-state-recovery.md) 스냅샷 + WAL replay 복구 → [ADR-038](docs/adr/038-deterministic-trade-id.md) 결정적 trade id
-3. [ADR-014](docs/adr/014-async-settlement-via-event-log.md) 이벤트 로그 정산 → [ADR-067](docs/adr/067-settlement-dead-letter-queue.md) DLQ → [ADR-069](docs/adr/069-in-memory-balance-ledger.md) 인메모리 원장 → [ADR-077](docs/adr/077-settlement-process-split-and-graceful-shutdown.md) 정산 프로세스 분리
-4. [ADR-028](docs/adr/028-futures-margin-position-model.md) 선물 마진 → [ADR-029](docs/adr/029-mark-price-internal-index.md) 자체 인덱스 mark → [ADR-031](docs/adr/031-liquidation-insurance-fund.md) 청산·보험기금 → [ADR-039](docs/adr/039-cross-margin-per-position-toggle.md) cross
-5. [ADR-035](docs/adr/035-multi-app-split.md) 멀티앱 → [ADR-036](docs/adr/036-portal-app.md) portal → [ADR-076](docs/adr/076-product-maturity-stages-and-blast-radius.md) 제품 단계와 장애 격리
-6. [ADR-062](docs/adr/062-production-deployment.md) 단일 호스트 배포 → [ADR-065](docs/adr/065-production-fork.md) 프로덕션 포크 → [ADR-071](docs/adr/071-git-monorepo.md) 모노레포
+## 설계 전제
 
-## 어떻게 만들었나
+구형 Intel Mac mini에 Linux를 설치해 자가 호스팅하는 환경을 기준으로 설계했습니다. 듀얼코어 CPU와 HDD의 자원 제약을 고려해, 서비스와 파티션을 심볼 수만큼 늘리는 대신 제한된 자원 안에서 거래를 처리하는 구성을 선택했습니다.
 
-설계·정책 결정과 검증은 사람이 했고, 구현의 상당 부분은 AI 코딩 에이전트에 위임했다. 그래서 기록이 곧 협업 규율이다.
+### 여러 심볼이 하나의 파티션을 공유
 
-- 결정은 `docs/adr/`에 남기고, 코드가 ADR과 달라지면 ADR에 날짜 배너를 단다.
-- 에이전트에게 준 교정은 `docs/feedback/`에 Rule/Why/How to apply로 남겨 다음 세션이 반복하지 않게 한다.
-- 검증은 `docs/test-reports/`의 캠페인 기록과 `bitshuriken-prod-bots`의 정합성 체커가 담당하고, 미해결 버그는 `docs/specs/refactor-observations.md`에 번호로 관리한다.
-- 커밋의 `Co-Authored-By` 트레일러는 그 흔적이다.
+초기에는 심볼마다 전용 Kafka 파티션을 배정했지만, 심볼이 늘어날수록 파티션 수와 HDD I/O·복구 부담이 커졌습니다. 현재는 심볼 해시로 정해진 수의 파티션에 배정합니다. 기본값은 시장별 토픽당 6개이며, 여러 심볼이 같은 파티션을 공유합니다.
 
-## 알려진 한계
+심볼별 전용 파티션을 두지 않을 뿐, 동일 심볼의 주문과 취소는 여전히 같은 파티션으로 전달해 처리 순서를 유지합니다. 대신 같은 파티션에 배정된 심볼들은 처리 자원을 공유하므로, 특정 심볼의 부하가 다른 심볼의 처리 지연에 영향을 줄 수 있습니다. 배경과 복구 방식은 [파티션 구성 결정](docs/adr/063-match-partition-buckets-and-stw.md)에 정리했습니다.
 
-- 선물은 **beta**다. 정산 프로세스 분리 이후 포지션·잔고 WS 이벤트가 클라이언트에 닿지 않아 폴링에 의존하고, GA 종료 조건과 장애 격리 매트릭스는 [ADR-076](docs/adr/076-product-maturity-stages-and-blast-radius.md) §5·§6에 있다.
-- 단일 인스턴스·단일 호스트다. 원장이 프로세스 로컬이라 레플리카가 아니라 샤드로 확장하는 구조이고, HA는 다음 단계다([ADR-069](docs/adr/069-in-memory-balance-ledger.md) §6).
-- 미해결 버그 목록은 [refactor-observations.md](docs/specs/refactor-observations.md), 정리 대상 코드는 [2026-09-16 정리 감사](docs/specs/2026-09-16-cleanup-audit.md).
+### 공유 파티션의 심볼별 재처리
 
-## Monorepo layout
+주문장 스냅샷에는 심볼별 마지막 처리 오프셋을 저장합니다. 복구할 때는 같은 파티션을 공유하는 심볼 중 가장 이른 복구 지점(`last_offset + 1`)부터 메시지를 읽고, 각 심볼의 스냅샷에 이미 반영된 메시지는 건너뜁니다. Kafka에서 읽는 위치는 파티션 단위지만, 실제 재처리 여부는 심볼별로 판단합니다.
 
-| dir | 역할 | stack |
+스냅샷이 없는 심볼은 빈 주문장으로 시작하며, 부팅 시점 이전 메시지를 건너뜁니다. 따라서 스냅샷이 없는 주문장까지 과거 입력 전체로 복구하는 방식은 아닙니다. 재처리에 필요한 메시지가 Kafka에 보존되어 있어야 복구할 수 있습니다.
+
+### Redis를 사용하지 않는 이유
+
+현재 구성에서는 Redis를 도입할 계획이 없습니다. 잔고 확인·예약 등 빈번한 처리에 별도 저장소와의 왕복 통신(RTT)을 추가하지 않도록 프로세스 내부의 상태를 사용하고, 복구에 필요한 기록은 PostgreSQL과 Kafka에 남깁니다. Redis를 사용했던 이전 버전과는 다른 선택입니다.
+
+이 선택은 단일 호스트와 제한된 자원을 전제로 합니다. 프로세스 간 상태 공유와 수평 확장이 단순해지는 것은 아니며, 향후 배포 구조가 바뀌면 상태 소유권과 공유 방식도 다시 검토해야 합니다.
+
+## 구조
+
+백엔드는 현물·선물·계정 API와 정산 프로세스로 나뉩니다. 거래 API와 Python 매칭엔진은 Kafka로 주문과 체결 결과를 주고받습니다.
+
+신규 주문과 취소는 같은 입력 토픽을 사용하며, 동일 심볼의 메시지는 같은 파티션에서 순서대로 처리합니다. 엔진은 가격·수량을 `10^8` 배 정수로 계산하고, 서비스 사이에서는 문자열로 전달해 정밀도를 유지합니다.
+
+주문장은 스냅샷과 이후 입력 메시지로 복원합니다. 체결 ID는 주문 ID를 기준으로 생성해 재처리 후에도 유지하며, 정산에서는 고유 이벤트 키로 중복 반영을 방지합니다. 잔고 원장은 별도로 저장한 변경 이력을 재처리해 복원하고, 조회용 DB 잔고는 비동기로 갱신합니다.
+
+| 디렉터리 | 역할 | 주요 기술 |
 | --- | --- | --- |
-| [bitshuriken-prod-be/](bitshuriken-prod-be/) | 백엔드 API — apps/{spot 5101, futures 5102, portal 5103, settle 5104(정산 프로세스, 헬스 전용)} | Nest.js monorepo + Prisma + Kafka |
-| [bitshuriken-prod-fe/](bitshuriken-prod-fe/) | 프론트엔드 (port 5100) | Next.js |
-| [bitshuriken-prod-match/](bitshuriken-prod-match/) | 매칭엔진 (Lane 패턴, Kafka) | Python |
-| [bitshuriken-prod-infra/](bitshuriken-prod-infra/) | 프로드 배포 (compose + nginx + deploy.sh) | docker |
-| [bitshuriken-prod-bots/](bitshuriken-prod-bots/) | Binance/Upbit 미러링·정합성·부하 테스트 | Node.js |
-| [bitshuriken-prod-agents/](bitshuriken-prod-agents/) | 백테스트·라이브 전략 실행기 | Node.js |
-| [bitshuriken-prod-mcp/](bitshuriken-prod-mcp/) | API 레퍼런스 MCP 서버 (읽기 전용, 개발자 도구) | Node.js |
-| [bitshuriken-prod-fly/](bitshuriken-prod-fly/) | 실험: FlyWire 초파리 커넥톰 트레이딩 뇌 (별도 대시보드 :5130) | Node.js |
+| [bitshuriken-prod-be/](bitshuriken-prod-be/) | 현물·선물·계정 API, 정산 | NestJS, Prisma, PostgreSQL, Kafka |
+| [bitshuriken-prod-fe/](bitshuriken-prod-fe/) | 거래 화면과 계정 관리 | Next.js, React |
+| [bitshuriken-prod-match/](bitshuriken-prod-match/) | 매칭엔진, 주문장 복구 | Python, Kafka |
+| [bitshuriken-prod-infra/](bitshuriken-prod-infra/) | 배포 구성 | Docker Compose, Nginx |
+| [bitshuriken-prod-bots/](bitshuriken-prod-bots/) | 시장 미러링, 정합성 검사, 부하 테스트 | Node.js |
+| [bitshuriken-prod-agents/](bitshuriken-prod-agents/) | 백테스트, 라이브 전략 실행 | Node.js |
+| [bitshuriken-prod-mcp/](bitshuriken-prod-mcp/) | API 문서 조회용 MCP 서버 | Node.js |
+| [bitshuriken-prod-fly/](bitshuriken-prod-fly/) | FlyWire 커넥톰 기반 트레이딩 실험 | Node.js |
 
-모든 디렉터리는 하나의 Git 저장소에서 버전 관리한다. 서비스별 의존성·빌드·배포 단위는
-그대로 독립적이며, 별도의 루트 workspace 도구는 사용하지 않는다.
+하나의 Git 저장소에서 관리하며, 의존성 설치와 빌드는 서비스별로 진행합니다. 루트에 별도의 workspace 도구는 사용하지 않습니다.
 
-## Quickstart (local dev)
+## 로컬 실행
 
-```bash
-./scripts/exchange.sh start   # 인프라 → BE → 매칭엔진 → FE, 기능 검증 포함
-./scripts/exchange.sh status
-./scripts/exchange.sh stop
-```
+Node.js 22, npm, Python 3.12, Docker와 Docker Compose가 필요합니다. 실행 스크립트는 Bash 환경을 기준으로 합니다.
 
-최초 1회:
+### 설치와 환경 설정
 
 ```bash
 (cd bitshuriken-prod-be && npm install)
 (cd bitshuriken-prod-fe && npm install)
 (cd bitshuriken-prod-bots && npm install)
 (cd bitshuriken-prod-agents && npm install)
-(cd bitshuriken-prod-mcp && npm install && npm run build)
-(cd bitshuriken-prod-fly && npm install)   # 실험 프로젝트 — 선택
 (cd bitshuriken-prod-match && python3 -m venv venv && venv/bin/pip install -r requirements.txt)
+```
+
+MCP 서버와 트레이딩 실험은 필요한 경우에 설치합니다.
+
+```bash
+(cd bitshuriken-prod-mcp && npm install && npm run build)
+(cd bitshuriken-prod-fly && npm install)
+```
+
+사용할 서비스의 `.env.example`을 `.env`로 복사하고 로컬 환경에 맞게 설정합니다. `.env`와 전략 실행 데이터는 Git에 포함하지 않습니다.
+
+새 로컬 환경에서는 다음 명령으로 DB와 Kafka를 초기화합니다. **기존 환경에서 실행하면 Docker 볼륨의 데이터가 삭제되므로, 데이터를 보존해야 할 때는 실행하지 마세요.**
+
+```bash
 ./scripts/exchange.sh reset
 ```
 
-필요한 서비스는 `.env.example`을 `.env`로 복사해 로컬 값을 설정한다. `.env`와 전략 실행 데이터는
-Git에 포함되지 않는다.
+### 시작과 종료
+
+```bash
+./scripts/exchange.sh start
+./scripts/exchange.sh status
+./scripts/exchange.sh stop
+```
+
+`start`는 인프라, 백엔드, 매칭엔진, 프론트엔드를 순서대로 시작하고 상태를 확인합니다.
+
+| 서비스 | 기본 포트 |
+| --- | --- |
+| 프론트엔드 | 5100 |
+| 현물 API | 5101 |
+| 선물 API | 5102 |
+| 계정 API | 5103 |
+| 정산 상태 확인 | 5104 |
 
 ### Windows
 
-Windows에서는 **WSL2 + Docker Desktop의 WSL integration** 환경에서 저장소를 WSL 파일시스템에
-clone한 뒤 위 Linux 명령을 그대로 실행한다. PowerShell/CMD에서 `exchange.sh`를 직접 실행하는
-경로는 지원하지 않는다.
+WSL2와 Docker Desktop의 WSL integration을 사용합니다. 저장소를 WSL 파일시스템에 복제한 뒤 위 명령을 실행하세요. PowerShell이나 CMD에서 실행 스크립트를 직접 호출하는 방식은 지원하지 않습니다.
 
-Ubuntu WSL 기준 기본 도구:
+Ubuntu WSL에서 필요한 기본 도구는 다음과 같습니다.
 
 ```bash
 sudo apt update
 sudo apt install -y build-essential curl git jq lsof procps python3 python3-venv
 ```
 
-Node.js 22와 npm은 WSL 내부에 설치하고, Docker Desktop 설정에서 사용하는 WSL 배포판의
-integration을 활성화한다.
+Node.js와 npm도 WSL 내부에 설치하고, Docker Desktop에서 해당 WSL 배포판의 integration을 활성화합니다.
 
-## Prod deploy
+## 테스트
 
-GHCR 이미지 pull 기반 단일 호스트 배포 — [bitshuriken-prod-infra/README.md](bitshuriken-prod-infra/README.md) (ADR-062).
+백엔드와 매칭엔진의 단위·회귀 테스트는 각 디렉터리에서 실행합니다.
 
-## Docs
+```bash
+(cd bitshuriken-prod-be && npm test)
+(cd bitshuriken-prod-match && venv/bin/python -m pytest -q)
+```
 
-- [docs/adr/](docs/adr/) — 아키텍처 의사결정 기록
-- [docs/feedback/](docs/feedback/) — 작업 방식 피드백/교정 기록
-- [docs/specs/](docs/specs/) — 구현 플랜/관찰 기록
-- [docs/test-reports/](docs/test-reports/) — 검증 캠페인 기록(정합성·충실도·TPS)
-- [docs/trading/](docs/trading/) — 전략 실행 일지와 실증된 교훈
-- 구 프로젝트(options/dex 포함 — mcp는 [ADR-074](docs/adr/074-prod-docs-mcp-server.md)로 복귀)는 `../bitshuriken-v2/`에 아카이브
+[CI](.github/workflows/ci.yml)에서는 백엔드 테스트와 타입 검사, 프론트엔드 타입 검사와 린트, 매칭엔진 테스트, 봇·전략 실행기의 타입 검사를 수행합니다. DB·Kafka를 사용하는 통합 검증과 부하 테스트는 별도로 실행합니다.
+
+장애 복구와 부하 테스트 결과는 실행 조건과 함께 [검증 기록](docs/test-reports/)에 남깁니다. 개별 테스트 결과를 서비스 전체의 처리량이나 무중단 보장으로 사용하지 않습니다.
+
+## 배포
+
+GHCR에 게시한 이미지를 받아 단일 호스트에서 실행하는 구성을 제공합니다. 환경 설정과 배포 절차는 [배포 문서](bitshuriken-prod-infra/README.md)를 참고하세요.
+
+## v2에서의 포크
+
+이 저장소는 `bitshuriken-v2`에서 현물·선물 거래소 코어를 중심으로 분리한 프로젝트입니다. 포크 당시 options·DEX는 코어에서 제외했고, bots·agents는 외부 API를 사용하는 전략 테스트 서비스로 포함했습니다. MCP 서버는 이후 API 문서 조회용 개발 도구로 다시 추가했습니다.
+
+이전 구현과 설계 배경은 로컬의 `../bitshuriken-v2/`에서 참고할 수 있습니다. v2는 읽기 전용 아카이브이며, 현재 개발과 수정은 이 저장소에서 진행합니다. 이전 코드를 참고할 때는 현재 코드와 서비스별 `AGENTS.md`, 후속 ADR을 함께 확인하세요.
+
+- [프로덕션 포크 배경](docs/adr/065-production-fork.md)
+- [단일 Git 저장소로 통합](docs/adr/071-git-monorepo.md)
+- [MCP 서버 재도입](docs/adr/074-prod-docs-mcp-server.md)
+
+## 설계와 개발 기록
+
+주요 설계 결정은 다음 문서에서 확인할 수 있습니다.
+
+- 주문 처리: [심볼별 처리 구조](docs/adr/013-match-engine-lane-architecture.md), [Kafka 파티션 구성](docs/adr/063-match-partition-buckets-and-stw.md)
+- 장애 복구: [주문장 복구](docs/adr/034-match-engine-state-recovery.md), [재처리 시 체결 ID 유지](docs/adr/038-deterministic-trade-id.md)
+- 잔고·정산: [비동기 정산](docs/adr/014-async-settlement-via-event-log.md), [실패 이벤트 격리](docs/adr/067-settlement-dead-letter-queue.md), [인메모리 원장](docs/adr/069-in-memory-balance-ledger.md), [정산 프로세스 분리](docs/adr/077-settlement-process-split-and-graceful-shutdown.md)
+- 선물: [마진·포지션](docs/adr/028-futures-margin-position-model.md), [마크 가격](docs/adr/029-mark-price-internal-index.md), [청산·보험기금](docs/adr/031-liquidation-insurance-fund.md)
+
+이 밖의 [설계 기록](docs/adr/), [구현 계획과 알려진 문제](docs/specs/), [테스트 결과](docs/test-reports/), [전략 실행 기록](docs/trading/), [개발 과정의 피드백](docs/feedback/)도 저장소에서 관리합니다. 과거 결정이 변경된 경우에는 해당 문서의 후속 기록을 함께 확인하세요.
